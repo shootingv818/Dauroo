@@ -31,6 +31,7 @@ from telethon import Button, TelegramClient, events
 import db
 import gate
 import ratelimit
+import relay
 from bot import app as shared
 from bot import cards, logbus
 from bot.store import store
@@ -39,8 +40,11 @@ from config import config
 LINE = cards.DIVIDER
 
 config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+# proxy=None وقتی relay خاموش است (مستقیم وصل می‌شود). وقتی روشن است، Telethon
+# فقط از تونلِ محلیِ SOCKS رد می‌شود — تنها ترافیک تلگرام.
 bot = TelegramClient(str(config.DATA_DIR / "owner_bot"),
-                     config.API_ID, config.API_HASH)
+                     config.API_ID, config.API_HASH,
+                     proxy=relay.telethon_proxy())
 
 #: وضعیت گفتگوی مالک
 state: dict = {}
@@ -186,7 +190,8 @@ def home_kb() -> list:
          Button.inline("🧹 ریست", b"reset")],
         [Button.inline("📊 منابع", b"res"),
          Button.inline("🛠 حالت تعمیر", b"maint")],
-        [Button.inline("♻️ بروزرسانی", b"home")],
+        [Button.inline("🛰 relayها", b"relays"),
+         Button.inline("♻️ بروزرسانی", b"home")],
     ]
 
 
@@ -845,6 +850,179 @@ async def on_maintenance_toggle(event):
 
 
 # =========================================================================== #
+# relayها  (تونلِ SSH به تلگرام) — فقط مالک
+# =========================================================================== #
+_RELAY_STATUS = {"active": "🟢 فعال", "idle": "⚪ آماده",
+                 "broken": "🔴 خراب", "disabled": "⛔ غیرفعال"}
+
+
+def _relay_line(r: dict, current_id) -> str:
+    mark = "▶️ " if current_id and int(r["id"]) == int(current_id) else ""
+    st = _RELAY_STATUS.get(r.get("status"), r.get("status") or "?")
+    ping = f" · {r.get('last_ping_ms')}ms" if r.get("last_ping_ms") else ""
+    return f"{mark}{r['host']}:{r.get('ssh_port', 22)} · {st}{ping}"
+
+
+@bot.on(events.CallbackQuery(data=b"relays"))
+async def on_relays(event):
+    if not is_owner(event):
+        return
+    stt = relay.manager.status()
+    rows = [
+        f"• وضعیت: {'🟢 روشن' if stt['enabled'] else '⚪ خاموش (مستقیم)'}",
+    ]
+    if stt["enabled"]:
+        cur = stt.get("current") or {}
+        rows += [
+            f"• تونلِ فعال: {'🟢 وصل' if stt['connected'] else '🔴 قطع'}"
+            + (f" · {cur.get('host')}" if cur else ""),
+            f"• پورت محلی SOCKS: 127.0.0.1:{stt['local_port']}",
+            f"• asyncssh: {'✅ نصب' if stt['have_asyncssh'] else '❌ نصب نیست'}",
+            "",
+            f"• تعداد relayها: {len(stt['relays'])}",
+        ]
+        if not stt["have_asyncssh"]:
+            rows.append("• ⚠️ بدون asyncssh تونل برقرار نمی‌شود: pip install asyncssh")
+    else:
+        rows += ["", "• برای روشن‌کردن، در .env مقدار RELAY_ENABLED=1 و",
+                 "  اولین relay را ست کن، بعد ربات را ری‌استارت کن."]
+
+    kb = []
+    for r in stt["relays"]:
+        kb.append([Button.inline(_relay_line(r, stt["current_id"]),
+                                 f"rl:{r['id']}".encode())])
+    kb.append([Button.inline("➕ افزودن relay", b"rladd")])
+    if stt["enabled"]:
+        kb.append([Button.inline("🔄 اتصال مجدد", b"rlrc"),
+                   Button.inline("♻️ بروزرسانی", b"relays")])
+    kb.append([Button.inline("🏠 خانه", b"home")])
+    await _respond(event, "🛰 relayها (تونل به تلگرام)\n" + LINE + "\n\n" +
+                   "\n".join(rows) + "\n\n" + LINE +
+                   "\n▪ پروکسی فقط برای تلگرام است، نه چیز دیگر", buttons=kb)
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^rl:(\d+)$"))
+async def on_relay_detail(event):
+    if not is_owner(event):
+        return
+    rid = int(event.pattern_match.group(1))
+    r = db.get_relay(rid)
+    if not r:
+        await event.answer("relay پیدا نشد.", alert=True)
+        return
+    cur = relay.manager.status().get("current_id")
+    fp = "—"
+    if r.get("host_key"):
+        from relay.manager import _fp
+        fp = _fp(r["host_key"])
+    rows = [
+        f"• میزبان: {r['host']}:{r.get('ssh_port', 22)}",
+        f"• کاربر: {r.get('username')}",
+        f"• رمز: {relay.crypto.mask('x' * 8) if r.get('secret_enc') else '—'}",
+        f"• وضعیت: {_RELAY_STATUS.get(r.get('status'), r.get('status'))}"
+        + ("  ▶️ فعال" if cur and int(cur) == rid else ""),
+        f"• اولویت: {r.get('priority')}",
+        f"• آخرین سلامت موفق: {gate._age_words(r.get('last_ok')) if r.get('last_ok') else 'هرگز'}",
+        f"• آخرین بررسی: {gate._age_words(r.get('last_check')) if r.get('last_check') else 'هرگز'}",
+        f"• پینگ آخر: {r.get('last_ping_ms')}ms" if r.get("last_ping_ms") else None,
+        f"• دفعات قطعی: {r.get('disconnects', 0)}",
+        f"• کلید میزبان: {fp}",
+        f"• منبع: {'راه‌اندازی اولیه (.env)' if r.get('source') == 'bootstrap' else 'پنل'}",
+        f"• آخرین خطا: {r.get('last_error')}" if r.get("last_error") else None,
+    ]
+    kb = [
+        [Button.inline("▶️ سویچ به این", f"rlsw:{rid}".encode())],
+        [Button.inline("🗑 حذف", f"rldel:{rid}".encode()),
+         Button.inline("🔙 relayها", b"relays")],
+    ]
+    await _respond(event, "🛰 جزئیات relay\n" + LINE + "\n\n" +
+                   "\n".join(x for x in rows if x is not None) + "\n\n" + LINE +
+                   f"\n▪ #{rid}", buttons=kb)
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^rlsw:(\d+)$"))
+async def on_relay_switch(event):
+    if not is_owner(event):
+        return
+    rid = int(event.pattern_match.group(1))
+    if not db.get_relay(rid):
+        await event.answer("relay پیدا نشد.", alert=True)
+        return
+    await event.answer("در حال سویچ…")
+    ok = await relay.manager.switch(rid)
+    await logbus.emit(kind="relay_switch", title="🛰 سویچِ دستیِ relay",
+                      rows=[f"• relay #{rid}",
+                            f"• نتیجه: {'وصل شد' if ok else 'وصل نشد'}"],
+                      customer_id=None, log_label="سویچ relay", counted=False)
+    await on_relay_detail(event)
+
+
+@bot.on(events.CallbackQuery(data=b"rlrc"))
+async def on_relay_reconnect(event):
+    if not is_owner(event):
+        return
+    await event.answer("در حال اتصال مجدد…")
+    ok = await relay.manager.reconnect()
+    await logbus.emit(kind="relay_reconnect", title="🛰 اتصالِ مجددِ relay",
+                      rows=[f"• نتیجه: {'وصل شد' if ok else 'وصل نشد'}"],
+                      customer_id=None, log_label="اتصال مجدد relay", counted=False)
+    await on_relays(event)
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^rldel:(\d+)$"))
+async def on_relay_delete_ask(event):
+    if not is_owner(event):
+        return
+    rid = int(event.pattern_match.group(1))
+    r = db.get_relay(rid)
+    if not r:
+        await event.answer("relay پیدا نشد.", alert=True)
+        return
+    await _respond(event, logbus.card("🗑 حذف relay", [
+        f"• {r['host']}:{r.get('ssh_port', 22)}",
+        "",
+        "• مطمئنی؟ اگر همین الان فعال باشد، تونل قطع و به relay بعدی می‌رود.",
+    ]), buttons=[[Button.inline("🗑 بله، حذف کن", f"rldelok:{rid}".encode()),
+                 Button.inline("❌ لغو", f"rl:{rid}".encode())]])
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^rldelok:(\d+)$"))
+async def on_relay_delete(event):
+    if not is_owner(event):
+        return
+    rid = int(event.pattern_match.group(1))
+    r = db.get_relay(rid)
+    was_current = relay.manager.status().get("current_id") == rid
+    db.delete_relay(rid)
+    if was_current:
+        # relayِ فعال حذف شد → فوراً برو بعدی.
+        await relay.manager.reconnect()
+    await logbus.emit(kind="relay_delete", title="🛰 relay حذف شد",
+                      rows=[f"• {(r or {}).get('host')} (#{rid})"],
+                      customer_id=None, log_label="حذف relay", counted=False)
+    await on_relays(event)
+
+
+@bot.on(events.CallbackQuery(data=b"rladd"))
+async def on_relay_add(event):
+    if not is_owner(event):
+        return
+    if not relay.crypto.is_key_set(config.relay_secret_key()):
+        await _respond(event, logbus.card("⚠️ کلیدِ رمزنگاری نیست", [
+            "• برای ذخیره‌ی امنِ رمزِ relay، اول در .env مقدار",
+            "  RELAY_SECRET_KEY (یا RAW_ENCRYPTION_KEY) را ست کن،",
+            "  بعد ربات را ری‌استارت کن.",
+            "",
+            "• رمز هیچ‌وقت بدونِ رمزنگاری ذخیره نمی‌شود.",
+        ]), buttons=[[Button.inline("🔙 relayها", b"relays")]])
+        return
+    state[int(event.sender_id)] = {"step": "relay_host", "relay": {}}
+    await _respond(event, logbus.card("➕ افزودن relay — گام ۱ از ۴", [
+        "• آدرس IP یا دامنه‌ی سرور relay را بفرست.",
+    ]), buttons=[[Button.inline("❌ لغو", b"relays")]])
+
+
+# =========================================================================== #
 # روتر پیام‌های مالک
 # =========================================================================== #
 @bot.on(events.NewMessage(func=lambda e: e.is_private))
@@ -893,6 +1071,73 @@ async def on_message(event):
         db.set_note(uid, txt)
         await event.respond("یادداشت ذخیره شد.",
                            buttons=[[Button.inline("🔙 پروفایل", f"cust:{uid}".encode())]])
+        return
+
+    # ---- افزودن relay: میزبان → پورت → کاربر → رمز ---------------------- #
+    if step == "relay_host":
+        st["relay"]["host"] = txt
+        st["step"] = "relay_port"
+        await event.respond(logbus.card("➕ افزودن relay — گام ۲ از ۴", [
+            f"• میزبان: {txt}",
+            "• پورت SSH را بفرست (یا «-» برای پیش‌فرض ۲۲).",
+        ]), buttons=[[Button.inline("❌ لغو", b"relays")]])
+        return
+
+    if step == "relay_port":
+        port = 22
+        if txt not in ("-", ""):
+            try:
+                port = int(txt)
+                if not (1 <= port <= 65535):
+                    raise ValueError
+            except ValueError:
+                await event.respond("پورت باید عددی بین ۱ و ۶۵۵۳۵ باشد (یا «-»).")
+                return
+        st["relay"]["port"] = port
+        st["step"] = "relay_user"
+        await event.respond(logbus.card("➕ افزودن relay — گام ۳ از ۴", [
+            f"• پورت: {port}",
+            "• نام کاربری SSH را بفرست (یا «-» برای root).",
+        ]), buttons=[[Button.inline("❌ لغو", b"relays")]])
+        return
+
+    if step == "relay_user":
+        st["relay"]["user"] = "root" if txt in ("-", "") else txt
+        st["step"] = "relay_pass"
+        await event.respond(logbus.card("➕ افزودن relay — گام ۴ از ۴", [
+            f"• کاربر: {st['relay']['user']}",
+            "• رمز عبور SSH را بفرست.",
+            "• (پیام رمز بعد از ذخیره پاک می‌شود.)",
+        ]), buttons=[[Button.inline("❌ لغو", b"relays")]])
+        return
+
+    if step == "relay_pass":
+        state.pop(oid, None)
+        r = st["relay"]
+        key = config.relay_secret_key()
+        if not relay.crypto.is_key_set(key):
+            await event.respond("کلیدِ رمزنگاری ست نیست؛ relay ذخیره نشد.",
+                               buttons=[[Button.inline("🔙 relayها", b"relays")]])
+            return
+        # پیامِ حاویِ رمز را فوراً پاک کن (بهداشتِ رمز).
+        try:
+            await event.delete()
+        except Exception:  # noqa: BLE001
+            pass
+        secret_enc = relay.crypto.encrypt(txt, key)
+        rid = db.add_relay(host=r["host"], ssh_port=r.get("port", 22),
+                           username=r.get("user", "root"), secret_enc=secret_enc,
+                           priority=100, source="panel")
+        await logbus.emit(kind="relay_add", title="🛰 relay اضافه شد",
+                          rows=[f"• {r['host']}:{r.get('port', 22)} (#{rid})",
+                                f"• کاربر: {r.get('user', 'root')}"],
+                          customer_id=None, log_label="افزودن relay", counted=False)
+        await bot.send_message(oid, logbus.card("✅ relay اضافه شد", [
+            f"• {r['host']}:{r.get('port', 22)} (#{rid})",
+            "• رمز رمزنگاری‌شده ذخیره شد.",
+            "• برای امتحانِ همین حالا، «سویچ به این» را بزن.",
+        ]), buttons=[[Button.inline("🛰 جزئیات", f"rl:{rid}".encode()),
+                     Button.inline("🔙 relayها", b"relays")]])
         return
 
     if step == "num":
@@ -1022,6 +1267,18 @@ async def blocked_summary_loop() -> None:
             print(f"[blocked summary] {exc}", flush=True)
 
 
+async def _relay_probe() -> bool:
+    """health-checkِ واقعی: یک getMeِ تلگرام از داخلِ تونل.
+
+    اگر تونل خراب باشد این کند/شکست می‌خورد و نگهبان failover می‌کند — دقیقاً
+    همان چیزی که «بررسیِ واقعیِ تلگرام، نه فقط زنده‌بودنِ TCP» می‌خواهد.
+    """
+    try:
+        return bool(await bot.get_me())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def amain() -> None:
     problems = config.validate_owner()
     if problems:
@@ -1029,6 +1286,19 @@ async def amain() -> None:
     config.ensure_dirs()
     db.init()
     ratelimit.load()
+
+    # relay را قبل از اتصالِ تلگرام بالا بیاور: هاست در ایران است و بدون تونل،
+    # bot.start() به تلگرام نمی‌رسد. اولین relay از .env می‌آید (bootstrap).
+    if config.RELAY_ENABLED:
+        relay.ensure_bootstrap()
+        relay.manager.configure(health_probe=_relay_probe,
+                                on_event=relay.make_event_sink(logbus))
+        try:
+            up = await relay.manager.start()
+            print(f"relay tunnel: {'up' if up else 'not up yet (guardian retrying)'}",
+                  flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[relay start] {exc}", flush=True)
 
     await bot.start(bot_token=config.OWNER_BOT_TOKEN)
     logbus.bind(bot, config.OWNER_ID)

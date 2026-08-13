@@ -199,6 +199,35 @@ def init() -> None:
         )
     """)
 
+    # ---- relays (SSH → Telegram; owner-only, see relay/)
+    # The password is stored ENCRYPTED in secret_enc (never plaintext -- see
+    # relay/crypto.py). host_key holds the server key captured on first connect
+    # (trust-on-first-use); a later mismatch refuses the connection. status is
+    # telemetry the guardian loop maintains: idle | active | broken | disabled.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS relays (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            host         TEXT NOT NULL,
+            ssh_port     INTEGER DEFAULT 22,
+            username     TEXT DEFAULT 'root',
+            auth_kind    TEXT DEFAULT 'password',
+            secret_enc   TEXT DEFAULT '',
+            host_key     TEXT DEFAULT '',
+            status       TEXT DEFAULT 'idle',
+            priority     INTEGER DEFAULT 100,
+            fail_count   INTEGER DEFAULT 0,
+            disconnects  INTEGER DEFAULT 0,
+            last_check   REAL,
+            last_ok      REAL,
+            last_ping_ms INTEGER DEFAULT 0,
+            last_error   TEXT DEFAULT '',
+            source       TEXT DEFAULT 'panel',
+            added_at     REAL,
+            UNIQUE (host, ssh_port)
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_relay_pri ON relays(priority, id)")
+
     conn.commit()
     conn.close()
 
@@ -843,3 +872,94 @@ def set_maintenance(on: bool) -> None:
         flag.write_text(str(time.time()), encoding="utf-8")
     elif flag.exists():
         flag.unlink()
+
+
+
+# =========================================================================== #
+# relays  (SSH → Telegram)  — owner-only; see relay/manager.py
+# =========================================================================== #
+def add_relay(host: str, ssh_port: int, username: str, secret_enc: str,
+              priority: int = 100, source: str = "panel",
+              auth_kind: str = "password") -> int:
+    """Insert a relay (secret already ENCRYPTED) and return its id.
+
+    Unique on (host, ssh_port): re-adding the same endpoint updates its
+    credentials instead of duplicating it, which is also how the bootstrap
+    relay from .env stays in sync when the file changes.
+    """
+    conn = _conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO relays (host, ssh_port, username, secret_enc, priority, "
+        "source, auth_kind, status, added_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'idle', ?) "
+        "ON CONFLICT(host, ssh_port) DO UPDATE SET "
+        "  username=excluded.username, secret_enc=excluded.secret_enc, "
+        "  auth_kind=excluded.auth_kind",
+        (str(host), int(ssh_port), str(username), str(secret_enc),
+         int(priority), str(source), str(auth_kind), time.time()))
+    conn.commit()
+    row = c.execute("SELECT id FROM relays WHERE host=? AND ssh_port=?",
+                    (str(host), int(ssh_port))).fetchone()
+    conn.close()
+    return int(row["id"])
+
+
+def get_relay(relay_id: int):
+    conn = _conn()
+    row = conn.execute("SELECT * FROM relays WHERE id=?", (int(relay_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def find_relay(host: str, ssh_port: int):
+    conn = _conn()
+    row = conn.execute("SELECT * FROM relays WHERE host=? AND ssh_port=?",
+                       (str(host), int(ssh_port))).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_relays(include_disabled: bool = True) -> list:
+    """Ordered the way the guardian tries them: priority asc, then id."""
+    conn = _conn()
+    where = "" if include_disabled else "WHERE status != 'disabled'"
+    rows = conn.execute(
+        f"SELECT * FROM relays {where} ORDER BY priority ASC, id ASC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_relay(relay_id: int) -> bool:
+    conn = _conn()
+    cur = conn.execute("DELETE FROM relays WHERE id=?", (int(relay_id),))
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def set_relay_fields(relay_id: int, **fields) -> None:
+    """Update guardian telemetry / status. Unknown fields ignored on purpose."""
+    allowed = {"status", "priority", "fail_count", "disconnects", "last_check",
+               "last_ok", "last_ping_ms", "last_error", "host_key",
+               "secret_enc", "username", "auth_kind"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(int(relay_id))
+    conn = _conn()
+    conn.execute(f"UPDATE relays SET {', '.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+
+
+def count_relays() -> int:
+    conn = _conn()
+    n = conn.execute("SELECT COUNT(*) AS n FROM relays").fetchone()["n"]
+    conn.close()
+    return int(n)

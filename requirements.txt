@@ -11,5 +11,10 @@ telethon>=1.36.0
 # photo_export/renderer.py عکس‌ها را با کروم headless به PDF می‌برد، پس وابستگی
 # جدیدی نمی‌خواهد. اگر روزی رندر بدون مرورگر شد، reportlab و Pillow لازم می‌شوند.
 
+# ---- relay (تونل SSH به تلگرام؛ فقط اگر RELAY_ENABLED=1) ----
+# SSH بومی روی asyncio: تونل داخلِ همان event loopِ ربات ساخته می‌شود، بدون
+# spawn کردنِ ssh/autossh و بدون systemd. اگر relay را روشن می‌کنی، این لازم است.
+asyncssh>=2.14.0
+
 # ---- اختیاری ----
 # cryptg  # رمزنگاری سریع‌تر Telethon (بومی، کامپایل لازم دارد)

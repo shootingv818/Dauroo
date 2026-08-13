@@ -38,6 +38,7 @@ from telethon import Button, TelegramClient, events
 import db
 import gate
 import ratelimit
+import relay
 from bot import app as shared
 from bot import cards, contacts_store, logbus
 from bot.runner import manager
@@ -47,8 +48,11 @@ from config import config
 LINE = cards.DIVIDER
 
 config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+# مثلِ ربات مالک: proxy=None وقتی relay خاموش است. این پروسه تونلِ خودش را روی
+# پورتِ محلیِ متفاوت (RELAY_LOCAL_PORT+1) دارد تا با پروسه‌ی مالک تداخل نکند.
 bot = TelegramClient(str(config.DATA_DIR / "customer_bot"),
-                     config.API_ID, config.API_HASH)
+                     config.API_ID, config.API_HASH,
+                     proxy=relay.telethon_proxy())
 
 #: وضعیت گفتگو: uid -> {"step": ..., ...}
 state: dict = {}
@@ -1275,6 +1279,25 @@ async def amain() -> None:
     ratelimit.load()
     db.mark_stale_jobs()
     swept = shared.sweep_pending_profiles()
+
+    # تونلِ relay قبل از اتصالِ تلگرام (هاست در ایران). این پروسه relay را مدیریت
+    # نمی‌کند (آن کار مالک است) ولی برای خروجیِ خودش تونلِ خودش را بالا می‌آورد.
+    if config.RELAY_ENABLED:
+        relay.ensure_bootstrap()
+
+        async def _relay_probe() -> bool:
+            try:
+                return bool(await bot.get_me())
+            except Exception:  # noqa: BLE001
+                return False
+
+        relay.manager.configure(health_probe=_relay_probe,
+                                on_event=relay.make_event_sink(logbus))
+        try:
+            up = await relay.manager.start()
+            print(f"relay tunnel: {'up' if up else 'retrying'}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[relay start] {exc}", flush=True)
 
     await bot.start(bot_token=config.CUSTOMER_BOT_TOKEN)
     logbus.bind(bot, config.OWNER_ID)

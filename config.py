@@ -315,6 +315,65 @@ class Config:
     # Chromiums and the host dies. On 12 GB, 3 is comfortable.
     BROWSER_SLOTS: int = _get_int("BROWSER_SLOTS", 3)
 
+    # ================================================================== #
+    # RELAY  (SSH tunnel → Telegram)  — see relay/__init__.py
+    # ================================================================== #
+    # The host runs in Iran, where Telegram is filtered but the general egress
+    # is open. One or more external VPSs act as SSH relays: the bot logs into a
+    # relay and opens a LOCAL SOCKS5 listener tunnelled through it. ONLY the
+    # Telethon client is pointed at that listener (127.0.0.1), so the tunnel
+    # carries Telegram traffic and nothing else -- it is not a system proxy.
+    RELAY_ENABLED: bool = _get_bool("RELAY_ENABLED", False)
+    # Bootstrap relay (the FIRST one): read from env at startup, because until a
+    # relay is up the bot cannot reach Telegram to receive an "add relay"
+    # command. Later relays are added from the owner panel.
+    RELAY_HOST: str = os.environ.get("RELAY_HOST", "")
+    RELAY_SSH_PORT: int = _get_int("RELAY_SSH_PORT", 22)
+    RELAY_USER: str = os.environ.get("RELAY_USER", "root")
+    # Bootstrap password. It is copied into the DB ENCRYPTED at first boot and
+    # then only the encrypted copy is used; keep it in .env only for bootstrap.
+    RELAY_PASSWORD: str = os.environ.get("RELAY_PASSWORD", "")
+    # Local SOCKS5 port the tunnel listens on. The customer process uses
+    # RELAY_LOCAL_PORT+1 so the two bot processes do not clash (see
+    # relay_local_port).
+    RELAY_LOCAL_PORT: int = _get_int("RELAY_LOCAL_PORT", 1080)
+    # Key that encrypts relay passwords at rest. Falls back to RAW_ENCRYPTION_KEY.
+    # If neither is set, a password-bearing relay is refused (never plaintext).
+    RELAY_SECRET_KEY: str = os.environ.get("RELAY_SECRET_KEY", "")
+    # Guardian loop: how often to run a REAL health-check (a Telegram getMe
+    # through the tunnel, not a bare TCP ping), the per-check timeout, and how
+    # many consecutive failures trigger a failover to the next relay.
+    RELAY_HEALTH_INTERVAL: int = _get_int("RELAY_HEALTH_INTERVAL", 30)
+    RELAY_PROBE_TIMEOUT: int = _get_int("RELAY_PROBE_TIMEOUT", 12)
+    RELAY_FAIL_THRESHOLD: int = _get_int("RELAY_FAIL_THRESHOLD", 3)
+    # Latency guard: if a check's round-trip exceeds RELAY_MAX_PING_MS for
+    # RELAY_PING_HIGH_STREAK checks in a row, treat the relay as unhealthy and
+    # fail over. 0 disables the latency guard (only hard failures fail over).
+    RELAY_MAX_PING_MS: int = _get_int("RELAY_MAX_PING_MS", 4000)
+    RELAY_PING_HIGH_STREAK: int = _get_int("RELAY_PING_HIGH_STREAK", 3)
+    # Reconnect backoff (seconds): exponential from BASE, capped at CAP, with
+    # jitter, so a flapping relay does not become a reconnect storm.
+    RELAY_BACKOFF_BASE: float = float(os.environ.get("RELAY_BACKOFF_BASE", "2") or 2)
+    RELAY_BACKOFF_CAP: float = float(os.environ.get("RELAY_BACKOFF_CAP", "60") or 60)
+    # SSH keepalive: detect a half-dead relay without waiting for the next probe.
+    RELAY_KEEPALIVE: int = _get_int("RELAY_KEEPALIVE", 15)
+
+    # NOTE: instance methods (not classmethod) so an instance-level override --
+    # what a test does, and what any future live-reload would do -- is honored.
+    # In normal use they resolve to the class attributes loaded from env anyway.
+    def relay_local_port(self) -> int:
+        """Local SOCKS port for THIS process.
+
+        Owner and customer are two processes on one host; each runs its own
+        tunnel so neither depends on the other for egress. They must not bind
+        the same port, so the customer offsets by one.
+        """
+        base = int(self.RELAY_LOCAL_PORT)
+        return base + 1 if (self.MODE or "owner").strip().lower() == "customer" else base
+
+    def relay_secret_key(self) -> str:
+        return self.RELAY_SECRET_KEY or self.RAW_ENCRYPTION_KEY or ""
+
     # ---- Maintenance ----
     # Owner kill switch. Implemented as a flag FILE so the other bot process
     # sees it without importing the owner's state.
