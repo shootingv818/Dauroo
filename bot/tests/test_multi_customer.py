@@ -481,6 +481,91 @@ def test_maintenance() -> None:
     check("خاموش‌شدن فایل را پاک می‌کند", not config.maintenance_flag().exists())
 
 
+def test_report_routing() -> None:
+    """مسیریابی کارت‌های موتور — نقصی که یک بار واقعاً وجود داشت.
+
+    موتور در ۵۴ نقطه کارت می‌سازد و همه را به `report` می‌دهد. اگر `report` فقط
+    به چت مشتری بفرستد (که در نسخه‌ی اول همین بود)، مشتری کارت کامل خطا را با
+    Trace و پاسخ خام ایتا می‌گیرد و گروه لاگ **هیچ‌کدام** را نمی‌گیرد.
+    """
+    section("مسیریابی کارت‌های موتور: چه چیزی به مشتری، چه چیزی به گروه لاگ")
+    import asyncio
+
+    from bot import app as shared
+
+    # کارت‌های کاملاً داخلی نباید به مشتری برسند.
+    for title in ("⏱ زمان‌بندی اجرا", "🖥 مرورگرهای آماده", "🔬 پروب ایمپورت",
+                  "🔑 peers ذخیره شد"):
+        show, _safe = shared.classify_card(f"{title}\n---\n• چیزی")
+        check(f"«{title}» به مشتری نمی‌رود", show is False)
+
+    # کارت‌های حساس: خبرش می‌رود، نسخه‌ی کاملش نه.
+    for title in ("⚠️ خطا", "🚫 محدودیت تشخیص داده شد", "⏸ ارسال متوقف شد"):
+        show, safe = shared.classify_card(f"{title}\n---\n• جزئیات خام")
+        check(f"«{title}» خبرش به مشتری می‌رود", show is True)
+        check(f"«{title}» نسخه‌ی امن دارد", bool(safe), str(safe))
+
+    # کارت‌های عادی کامل به مشتری می‌روند.
+    for title in ("✅ ارسال تمام شد", "🚀 ارسال شروع شد", "📥 مخاطبین ذخیره شد"):
+        show, safe = shared.classify_card(f"{title}\n---\n• موفق: ۱۰")
+        check(f"«{title}» کامل به مشتری می‌رود", show is True and safe is None)
+
+    # و رفتار واقعیِ report: کارت خطا به مشتری خام نرود، ولی به گروه برود.
+    class _Cli:
+        def __init__(self):
+            self.msgs = []
+
+        async def send_message(self, chat, text, buttons=None):
+            self.msgs.append((chat, text))
+
+    cli = _Cli()
+    logbus.bind(cli, 1000)
+    store.set_log_group_id(-100999)
+
+    report = shared.make_report(cli, 42, customer_id=42, label="علی",
+                                phone="989120000001")
+    raw = cards.error_card("send", account="7", code="PEER_FLOOD",
+                           detail="raw eitaa body", trace_id="ZZZ", engine="hybrid")
+    asyncio.run(report(raw))
+
+    to_cust = [t for c, t in cli.msgs if c == 42]
+    to_group = [t for c, t in cli.msgs if c == -100999]
+    check("مشتری پیامی گرفت", len(to_cust) == 1, str(len(to_cust)))
+    check("گروه لاگ هم گرفت", len(to_group) == 1, str(len(to_group)))
+    check("مشتری پاسخ خام سرور را نگرفت",
+          "raw eitaa body" not in to_cust[0], to_cust[0][:80])
+    check("مشتری نام موتور را نگرفت", "hybrid" not in to_cust[0])
+    check("مشتری کد پیگیری گرفت", "🔖" in to_cust[0])
+    check("گروه لاگ جزئیات خام را گرفت", "raw eitaa body" in to_group[0])
+    check("کارت گروه لاگ آیدی مشتری را دارد", "42" in to_group[0])
+    check("کارت گروه لاگ شماره‌ی ماسک‌شده را دارد", "98912***001" in to_group[0])
+
+    # کد پیگیری باید در هر دو نسخه یکی باشد، وگرنه پشتیبانی بی‌فایده است.
+    import re as _re
+    tc = _re.search(r"🔖 ([A-Z0-9]{6})", to_cust[0])
+    tg = _re.search(r"🔖 ([A-Z0-9]{6})", to_group[0])
+    check("کد پیگیری در دو نسخه یکی است",
+          bool(tc and tg and tc.group(1) == tg.group(1)),
+          f"{tc and tc.group(1)} vs {tg and tg.group(1)}")
+
+    # کارت داخلی: فقط گروه لاگ.
+    cli.msgs.clear()
+    asyncio.run(report(cards.timing_card("7", "hybrid", {"total": 10}, 1)))
+    check("کارت زمان‌بندی به مشتری نرفت",
+          not [t for c, t in cli.msgs if c == 42], str(cli.msgs[:1]))
+    check("کارت زمان‌بندی به گروه لاگ رفت",
+          len([t for c, t in cli.msgs if c == -100999]) == 1)
+
+    # جاب‌های خودِ مالک مسیریابی نمی‌خواهند.
+    cli.msgs.clear()
+    owner_report = shared.make_report(cli, 1000)
+    asyncio.run(owner_report(raw))
+    check("مالک کارت کامل را می‌گیرد",
+          any("raw eitaa body" in t for c, t in cli.msgs if c == 1000))
+
+    logbus.bind(None)
+
+
 def test_bots_import() -> None:
     section("هر دو ربات import می‌شوند و پنل رندر می‌شود")
     import customer_bot
@@ -524,6 +609,7 @@ def main_() -> int:
     test_phone_masking()
     test_cards_contract()
     test_store_adapter()
+    test_report_routing()
     test_jobs_and_events()
     test_outbox()
     test_maintenance()

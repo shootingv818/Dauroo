@@ -59,8 +59,20 @@ picked: dict = {}
 #: دروازه‌ی پذیرش مرورگر. `capture/pool.py` سقف `max_open` دارد ولی آن فقط
 #: سشن‌های **گرمِ آماده** را می‌بندد و جلوی یک لانچ جدید را نمی‌گیرد، پس بدون این
 #: سمافور N مشتری یعنی N کروم و مرگ هاست.
-_slots = asyncio.Semaphore(max(1, config.BROWSER_SLOTS))
+#:
+#: **تنبل ساخته می‌شود، نه در سطح ماژول.** یک `Semaphore` در لحظه‌ی ساخت به لوپِ
+#: جاری می‌چسبد؛ اگر هنگام import ساخته شود به لوپی می‌چسبد که ربات رویش اجرا
+#: نمی‌شود (و روی پایتون ۳.۹ همان‌جا کرش می‌کند، چون در تِرد اصلی لوپی نیست).
+_slots_obj = None
 _waiting = 0
+
+
+def _slots():
+    """سمافور مرورگر، در لوپِ در حال اجرا ساخته می‌شود."""
+    global _slots_obj
+    if _slots_obj is None:
+        _slots_obj = asyncio.Semaphore(max(1, config.BROWSER_SLOTS))
+    return _slots_obj
 
 
 # =========================================================================== #
@@ -435,11 +447,12 @@ async def _do_login(uid: int, phone: str) -> None:
     label = await _label(uid)
     staging = f"_pending_{phone}_{uuid.uuid4().hex[:6]}"
     live = shared.LiveCard(uid)
-    report = shared.make_report(bot, uid)
+    report = shared.make_report(bot, uid, customer_id=uid,
+                               label=label, phone=phone)
 
     _waiting += 1
     try:
-        if _slots.locked():
+        if _slots().locked():
             await bot.send_message(uid, logbus.card("⏳ در نوبت", [
                 f"• شماره: {_mask(phone)}",
                 f"• تخمین: حدود {max(1, _waiting)} دقیقه",
@@ -452,7 +465,7 @@ async def _do_login(uid: int, phone: str) -> None:
                       f"• اسلات‌ها: {config.BROWSER_SLOTS}"],
                 customer_id=uid, customer_label=label, phone=phone, trace=trace,
                 log_label="در نوبت", counted=False)
-        async with _slots:
+        async with _slots():
             state[uid] = {"step": "code", "phone": phone, "acct": staging,
                           "trace": trace}
             ok = await manager.start_bridge_login(
@@ -878,7 +891,8 @@ async def on_go(event):
 
     label = await _label(uid)
     live = shared.LiveCard(uid)
-    report = shared.make_report(bot, uid)
+    report = shared.make_report(bot, uid, customer_id=uid,
+                               label=label, phone=accounts[0][1])
     picked.pop(uid, None)
 
     await _respond(event, logbus.card("🚦 آماده‌ی ارسال", [
@@ -889,7 +903,7 @@ async def on_go(event):
     ]))
 
     async def _runner():
-        async with _slots:
+        async with _slots():
             try:
                 if len(accounts) == 1:
                     key, phone = accounts[0]
@@ -937,14 +951,15 @@ async def on_dry_run(event):
         return
     settings = dict(store.settings)
     live = shared.LiveCard(uid)
-    report = shared.make_report(bot, uid)
+    report = shared.make_report(bot, uid, customer_id=uid,
+                                label=await _label(uid), phone=a["phone"])
     await _respond(event, logbus.card("🧪 تست ارسال", [
         f"• اکانت: {_mask(a['phone'])}",
         "• شروع شد — نتیجه همین‌جا می‌آید.",
     ]))
 
     async def _runner():
-        async with _slots:
+        async with _slots():
             try:
                 await manager.run_dry_run(key, content, settings, report,
                                           account_phone=a["phone"], live=live)
@@ -996,14 +1011,15 @@ async def on_update_contacts(event):
     if not g:
         return
     a, key = g
-    report = shared.make_report(bot, uid)
+    report = shared.make_report(bot, uid, customer_id=uid,
+                                label=await _label(uid), phone=a["phone"])
     await _respond(event, logbus.card("🔄 بروزرسانی مخاطبین", [
         f"• اکانت: {_mask(a['phone'])}",
         "• شروع شد — چند ثانیه است.",
     ]))
 
     async def _runner():
-        async with _slots:
+        async with _slots():
             try:
                 await manager.run_save_contacts(key, report,
                                                 account_phone=a["phone"])
@@ -1130,7 +1146,8 @@ async def on_px_run(event):
         return
     a, key = g
     direction = db.customer_settings(uid).get("photo_direction") or "both"
-    report = shared.make_report(bot, uid)
+    report = shared.make_report(bot, uid, customer_id=uid,
+                                label=await _label(uid), phone=a["phone"])
     send_doc = shared.make_send_document(bot, uid)
     await _respond(event, logbus.card("🖼 ایمپورت تصاویر", [
         f"• اکانت: {_mask(a['phone'])}",
@@ -1139,7 +1156,7 @@ async def on_px_run(event):
     ]))
 
     async def _runner():
-        async with _slots:
+        async with _slots():
             try:
                 await manager.run_photo_export(
                     key, report, account_phone=a["phone"],
@@ -1181,11 +1198,12 @@ async def on_prefix(event):
     state.pop(uid, None)
     key = str(aid)
     settings = dict(store.settings)
-    report = shared.make_report(bot, uid)
+    report = shared.make_report(bot, uid, customer_id=uid,
+                                label=await _label(uid), phone=phone)
     live = shared.LiveCard(uid)
 
     async def _runner():
-        async with _slots:
+        async with _slots():
             try:
                 await manager.run_contacts(key, prefix, count, settings, report,
                                            live=live, account_phone=phone)
