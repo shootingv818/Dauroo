@@ -1,0 +1,39 @@
+# systemd unit برای ربات مشتری (Dauroo)
+# ======================================
+# همان کدبیس، پروسه‌ی دوم. این پروسه تونلِ خودش را روی پورتِ محلیِ +۱ بالا می‌آورد
+# تا با پروسه‌ی مالک تداخل نکند. مرورگرها (کرومِ لاگین/ارسال) اینجا اجرا می‌شوند،
+# پس این واحد سنگین‌تر است.
+#
+# نصب:
+#   sudo cp deploy/dauroo-customer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dauroo-customer
+#   journalctl -u dauroo-customer -f
+
+[Unit]
+Description=Dauroo customer bot (Eitaa SaaS) + relay tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dauroo
+Group=dauroo
+WorkingDirectory=/opt/dauroo
+EnvironmentFile=/opt/dauroo/.env
+Environment=MODE=customer
+ExecStart=/opt/dauroo/venv/bin/python main.py
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# مرورگرها اینجا زیرپردازه‌ی جدا (Chromium) هستند و رمِ زیادی می‌خورند؛ پس این
+# پروسه در فشارِ رم، کاندیدای معقول‌تری برای OOM است تا پروسه‌ی مالک — ولی هنوز
+# نه اولِ صف. سقفِ رمِ کلِ سرویس (مرورگرها) را در صورت نیاز اینجا محدود کن:
+# MemoryMax=9G
+OOMScoreAdjust=-100
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+# systemd unit برای ربات مالک (Dauroo)
+# =====================================
+# تونلِ relay داخلِ خودِ ربات است، پس تونل را جدا systemd نمی‌کنی — این واحد را
+# systemd می‌کنی و تونل با ربات بالا می‌آید و با ربات ری‌استارت می‌شود.
+#
+# نصب:
+#   sudo cp deploy/dauroo-owner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dauroo-owner
+#   journalctl -u dauroo-owner -f      # دیدنِ لاگ‌ها
+#
+# مسیرها را با محلِ واقعیِ پروژه و venv عوض کن.
+
+[Unit]
+Description=Dauroo owner bot (Eitaa SaaS) + relay tunnel
+# تا شبکه واقعاً بالا نیامده استارت نزن (وگرنه اولین اتصالِ SSH بی‌خود شکست می‌خورد)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dauroo
+Group=dauroo
+WorkingDirectory=/opt/dauroo
+EnvironmentFile=/opt/dauroo/.env
+# نقشِ این پروسه؛ روی مقدارِ MODE در .env می‌چربد.
+Environment=MODE=owner
+ExecStart=/opt/dauroo/venv/bin/python main.py
+
+# اگر کرش کرد یا relay قطع شد و ربات بیرون آمد، همیشه دوباره بالا بیا.
+Restart=always
+RestartSec=5
+# اگر مدام کرش کرد، در ۵ دقیقه ۵ بار تلاش، بعد کمی صبر (جلوی loopِ کرش).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# --- جدا نگه‌داشتنِ منابع: مسیرِ کنترل نباید زیرِ فشارِ مرورگرها خفه شود ---
+# اولویتِ CPU کمی بالاتر و کمترین احتمالِ کشته‌شدن توسط OOM، چون این پروسه
+# سبک است ولی حیاتی (بدونش هیچ‌چیز به تلگرام نمی‌رسد).
+Nice=-5
+OOMScoreAdjust=-600
+
+[Install]
+WantedBy=multi-user.target
