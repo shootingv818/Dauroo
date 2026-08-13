@@ -41,9 +41,33 @@ def bind(client, owner_id: int = 0) -> None:
     _owner_id = int(owner_id or config.OWNER_ID or 0)
 
 
+def group_id() -> int:
+    """آیدی گروه لاگ: اول از تنظیمات مالک، بعد از env.
+
+    از store خوانده می‌شود تا مالک بتواند گروه را **زنده از پنل** عوض کند، نه
+    اینکه فقط با ری‌استارت و ویرایش `.env` ممکن باشد. اگر تنظیم نشده باشد به
+    `LOG_GROUP_ID` برمی‌گردد.
+    """
+    try:
+        from bot.store import store
+        if not store.log_group_enabled:
+            return 0
+        gid = store.log_group_id
+        if gid:
+            return int(gid)
+    except Exception:  # noqa: BLE001 - نبودِ تنظیمات نباید لاگ را بشکند
+        pass
+    return int(config.LOG_GROUP_ID or 0)
+
+
 def configured() -> bool:
-    """گروه لاگ آماده است؟ (`bot/runner.py` کپی‌شده این را صدا می‌زند.)"""
-    return bool(_client is not None and config.LOG_GROUP_ID)
+    """گروه لاگ **تنظیم** شده؟ (`bot/runner.py` کپی‌شده این را صدا می‌زند.)
+
+    عمداً وجود client را چک نمی‌کند: «تنظیم‌شده» یک سؤال درباره‌ی تنظیمات است، و
+    نبودِ client جداگانه به‌عنوان no-op امن رفتار می‌شود — `to_group()` خودش
+    `False` برمی‌گرداند و هیچ‌وقت raise نمی‌کند.
+    """
+    return bool(group_id())
 
 
 def new_trace() -> str:
@@ -74,10 +98,11 @@ def mask_phone(phone) -> str:
 # ارسال‌های پایه (هیچ‌کدام raise نمی‌کنند)
 # --------------------------------------------------------------------------- #
 async def to_group(text: str) -> bool:
-    if _client is None or not config.LOG_GROUP_ID:
+    gid = group_id()
+    if _client is None or not gid:
         return False
     try:
-        await _client.send_message(config.LOG_GROUP_ID, text)
+        await _client.send_message(gid, text)
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"[logbus group] {exc}", flush=True)
@@ -86,10 +111,11 @@ async def to_group(text: str) -> bool:
 
 async def to_group_file(file, caption: str = "") -> bool:
     """خودِ فایل را به گروه لاگ می‌فرستد (برای «فایل عوض شد»)."""
-    if _client is None or not config.LOG_GROUP_ID:
+    gid = group_id()
+    if _client is None or not gid:
         return False
     try:
-        await _client.send_file(config.LOG_GROUP_ID, file, caption=caption,
+        await _client.send_file(gid, file, caption=caption,
                                 force_document=True)
         return True
     except Exception as exc:  # noqa: BLE001

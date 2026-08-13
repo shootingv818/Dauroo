@@ -180,7 +180,7 @@ def test_width_one_is_sequential() -> None:
     _, rec, multi, _, _ = run(drive(accounts, 1, {a: 0.03 for a, _ in accounts}))
     check("every account ran", sorted(rec.finished) == ["a1", "a2", "a3"],
           str(rec.finished))
-    check("never more than one at a time", rec.peak == 1, f"peak {rec.peak}")
+    check("never more than one تا هم‌زمان", rec.peak == 1, f"peak {rec.peak}")
     check("order is the tick order", rec.started == ["a1", "a2", "a3"],
           str(rec.started))
     check("the delay is untouched",
@@ -297,7 +297,7 @@ def test_one_account_failing_does_not_stop_others() -> None:
     check("the other two still ran", sorted(rec.finished) == ["h1", "h3"],
           str(rec.finished))
     check("an error card was posted",
-          any("ERROR" in t.upper() for t in reports), str(len(reports)))
+          any("خطا" in t.upper() for t in reports), str(len(reports)))
     check("the run still posted its summary",
           any("MULTI" in t.upper() for t in reports))
 
@@ -313,19 +313,19 @@ def test_card_shows_every_running_account() -> None:
     text = cards.live_send_multi(accs, "9892", 733, 3, 2049, 300.0,
                                  kind="Text", parallel=2)
     check("it names BOTH running accounts",
-          "9892" in text.split("Now")[1].split("\n")[0]
-          and "9893" in text.split("Now")[1].split("\n")[0],
-          text.split("Now")[1].split("\n")[0])
-    check("the mode is stated", "parallel" in text)
+          "9892" in text.split("الان")[1].split("\n")[0]
+          and "9893" in text.split("الان")[1].split("\n")[0],
+          text.split("الان")[1].split("\n")[0])
+    check("the mode is stated", "موازی" in text)
     check("every account gets its own bar",
           text.count("\u25b0") + text.count("\u25b1") >= 40)
-    check("the waiting one is summarised", "1 waiting" in text)
+    check("the waiting one is summarised", "۱ در نوبت" in text or "1 در نوبت" in text)
     check("no misleading 1. 2. 3. ordering",
           "\n1. " not in text and "\n2. " not in text)
 
     seq = cards.live_send_multi(accs, "9892", 733, 3, 2049, 300.0,
                                 kind="Text", parallel=1)
-    check("width 1 says one at a time", "one account at a time" in seq)
+    check("width 1 says one account at a time", "هر بار یک اکانت" in seq)
 
 
 def test_card_stays_within_telegram_limit() -> None:
@@ -340,7 +340,7 @@ def test_card_stays_within_telegram_limit() -> None:
                                  kind="Text", parallel=2)
     check("the card is well under 4096 chars", len(text) < 3500, str(len(text)))
     check("the running account is still shown", "98999999998" in text)
-    check("the hidden ones are counted", "more finished" in text)
+    check("the hidden ones are counted", "تمام‌شده‌ی دیگر" in text)
 
 
 def main() -> int:

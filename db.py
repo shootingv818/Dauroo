@@ -34,17 +34,25 @@ from pathlib import Path
 
 from config import config
 
-DB_PATH = Path(__file__).resolve().parent / "data" / "dauroo.db"
+#: مسیر دیتابیس از `DATA_DIR` می‌آید، نه از محل این فایل.
+#: اگر نسبت به `__file__` حساب می‌شد، تنظیم `DATA_DIR` روی دیتابیس بی‌اثر بود و
+#: استقرارهای جدا (یا یک اجرای تست) بی‌خبر همان فایل را به اشتراک می‌گذاشتند.
+DB_PATH = Path(config.DATA_DIR) / "dauroo.db"
 
 #: Events older than this are pruned. The add-quota window only needs 24h; the
 #: rest is kept so the owner's timeline view has history to show.
 EVENT_RETENTION_DAYS = 30
 
 
-def _conn() -> sqlite3.Connection:
+#: True پس از اینکه schema یک بار در این پروسه تضمین شد.
+_ready = False
+
+
+def _raw_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # timeout + busy_timeout: the owner and customer processes share this file,
-    # so wait for a held write lock instead of raising "database is locked".
+    # timeout + busy_timeout: پروسه‌ی مالک و مشتری یک فایل را به اشتراک
+    # می‌گذارند، پس منتظر آزادشدن قفل نوشتن بمان نه اینکه فوراً
+    # "database is locked" بدهی.
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
@@ -53,9 +61,28 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+def _conn() -> sqlite3.Connection:
+    """یک کانکشن، با تضمین اینکه schema وجود دارد.
+
+    خودش `init()` را در اولین استفاده صدا می‌زند تا هیچ ماژولی به ترتیبِ
+    راه‌اندازی وابسته نباشد: هر کسی که `db` را لمس کند جدول‌ها را آماده می‌بیند،
+    حتی اگر پیش از `amain()` باشد. `init()` هم idempotent است.
+    """
+    global _ready
+    if not _ready:
+        _ready = True          # قبل از init ست می‌شود تا بازگشتی نشود
+        try:
+            init()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[db init] {exc}", flush=True)
+    return _raw_conn()
+
+
 def init() -> None:
-    """Create everything. Idempotent; both bots call it at startup."""
-    conn = _conn()
+    """همه‌چیز را می‌سازد. Idempotent؛ هر دو ربات در startup صدایش می‌زنند."""
+    global _ready
+    _ready = True
+    conn = _raw_conn()
     c = conn.cursor()
 
     # ---- customers (the tenant table; the tenant id IS the Telegram user id)
@@ -400,6 +427,15 @@ def set_account_meta(account_id: int, **fields) -> None:
     vals.append(int(account_id))
     conn = _conn()
     conn.execute(f"UPDATE accounts SET {', '.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+
+
+def set_account_seq(account_id: int, seq: int) -> None:
+    """جایگاه اکانت در فهرست مشتری. اکانت تازه آخر می‌رود، نه اول."""
+    conn = _conn()
+    conn.execute("UPDATE accounts SET seq = ? WHERE id = ?",
+                 (int(seq), int(account_id)))
     conn.commit()
     conn.close()
 

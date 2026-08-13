@@ -455,7 +455,7 @@ def s16_every_peer_refused_is_remembered_once():
     check("no duplicates in the record",
           len(set(blocked_store.peers("s16").keys())) == n)
     check("restriction cards were capped",
-          sum(1 for x in lines if "LIMIT DETECTED" in x) <= 3)
+          sum(1 for x in lines if "محدودیت تشخیص داده شد" in x) <= 3)
 
 
 def s17_flaky_transport_still_delivers_everyone_eventually():

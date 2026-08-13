@@ -273,7 +273,7 @@ def test_sequential_baseline():
     check("no failures", job.summary.get("failed") == 0)
     check("file uploaded exactly once", d.calls["init"] == 1, d.calls)
     check("no UI fallback used", d.calls["ui"] == 0, d.calls)
-    check("one at a time", d.peak_inflight == 1, d.peak_inflight)
+    check("one تا هم‌زمان", d.peak_inflight == 1, d.peak_inflight)
     check("ledger recorded all", progress_store.done_count(
         "a_seq", progress_store.content_key({"kind": "file", "file_path": __file__,
                                            "file_name": "t.py", "caption": "c"})) == 10)
@@ -372,10 +372,10 @@ def test_peer_flood_can_be_configured_to_continue():
         d, account="a_pf_stop", contacts=peers(10),
         content={"kind": "text", "text": "pf"}, settings=dict(base)))
     check("paused by default", job.summary.get("sent", 0) < 10, job.summary)
-    check("said it auto-paused",
-          any("auto-paused" in x for x in lines), lines[-2:])
+    check("said it خودکار متوقف شد",
+          any("خودکار متوقف شد" in x for x in lines), lines[-2:])
     check("explained PEER_FLOOD is not a wait",
-          any("not a timed wait" in x for x in lines), lines[-2:])
+          any("انتظار زمان‌دار نیست" in x for x in lines), lines[-2:])
 
     # Owner turned the pause off: every recipient is attempted, restrictions are
     # reported (capped) and only Stop ends the run.
@@ -398,11 +398,11 @@ def test_peer_flood_can_be_configured_to_continue():
     check("the good half was delivered", job2.summary.get("sent") == 5, job2.summary)
     check("the refused half counted as failed", job2.summary.get("failed") == 5,
           job2.summary)
-    cards_posted = sum(1 for x in lines2 if "LIMIT DETECTED" in x)
+    cards_posted = sum(1 for x in lines2 if "محدودیت تشخیص داده شد" in x)
     check(f"restriction cards are capped ({cards_posted})", 1 <= cards_posted <= 3,
           cards_posted)
     check("the card says the run continues",
-          any("pause on limit is off" in x.lower() for x in lines2), lines2[:3])
+          any("توقف روی محدودیت» خاموش است" in x for x in lines2), lines2[:3])
 
 
 def test_long_flood_wait_stops():
@@ -412,7 +412,7 @@ def test_long_flood_wait_stops():
     job, lines, d = asyncio.run(run_send(d, account='a_flood_l', contacts=peers(5)))
     check("stopped early", job.summary.get("sent", 0) < 5, job.summary)
     check("a limit card was posted",
-          any("LIMIT" in x.upper() or "RESTRICT" in x.upper() for x in lines), lines[:3])
+          any("محدودیت" in x for x in lines), lines[:3])
 
 
 def test_force_stop_TWICE_keeps_the_ledger():
@@ -785,7 +785,7 @@ def test_hybrid_engine_end_to_end():
           R.blocked_store.count("a_hyb") == 3, R.blocked_store.count("a_hyb"))
     check("timing was measured", (job.summary.get("timing") or {}).get("total") is not None,
           job.summary.get("timing"))
-    check("a timing card was posted", any("RUN TIMING" in x for x in lines), lines[-1:])
+    check("a timing card was posted", any("زمان‌بندی اجرا" in x for x in lines), lines[-1:])
 
     # Second run: the refused peers must be skipped up front.
     sent_direct.clear()
@@ -867,7 +867,7 @@ def test_stage_card_appears_before_any_send():
 
     job = asyncio.run(go())
     first = live.texts[0] if live.texts else ""
-    check("a card was painted immediately", "WORKING" in first, first[:60])
+    check("a card was painted immediately", "در حال کار" in first, first[:60])
     check("it names the browser step", "open browser" in first, first[:120])
     check("it warns about the 2-3 minute start", "minutes" in first, first[:200])
     joined = "\n".join(live.texts)
@@ -876,7 +876,7 @@ def test_stage_card_appears_before_any_send():
                                     "prepare send path", "deliver messages")),
           joined[:300])
     check("steps get ticked off", "✅" in joined)
-    check("it hands over to the send card", "SENDING" in joined)
+    check("it hands over to the send card", "در حال ارسال" in joined)
     check("the job still delivered", job.summary.get("sent") == 3, job.summary)
 
 
@@ -1008,7 +1008,7 @@ def test_browserless_run_sends_without_a_page():
     check("the browser-free engine did it", len(sent) == 5, len(sent))
     check("the run reports the browser-free engine",
           job.summary.get("engine") == "hybrid", job.summary)
-    check("a preflight card was posted", any("READY TO SEND" in x for x in lines),
+    check("a preflight card was posted", any("آماده‌ی ارسال" in x for x in lines),
           lines[:1])
 
 
@@ -1071,17 +1071,17 @@ def test_preflight_card_estimates_from_the_last_run():
     from bot import cards as C
     fast = C.preflight_card("98912", "hybrid", "Text", 180, 0, 0, 3, 1, 1.9)
     check("it shows the recipient count", "180" in fast, fast)
-    check("it shows the pace", "3 at a time" in fast, fast)
-    check("it estimates a rate", "msg/s" in fast, fast)
+    check("it shows the pace", "3 تا هم‌زمان" in fast, fast)
+    check("it estimates a rate", "پیام بر ثانیه" in fast, fast)
     check("180 at ~1 msg/s is about 3 minutes", "00:02:5" in fast or "00:03:0" in fast,
           fast)
     slow = C.preflight_card("98912", "bridge", "File", 1000, 20, 140, 1, 3, 3.2, 9.5)
     check("skipped and refused are shown",
-          "20 already delivered" in slow and "140" in slow, slow)
-    check("the file size is shown", "9.5 MB" in slow, slow)
+          "20 قبلاً تحویل شده‌اند" in slow and "140" in slow, slow)
+    check("the file size is shown", "9.5 مگابایت" in slow, slow)
     first = C.preflight_card("98912", "bridge", "Text", 10, 0, 0, 1, 1, None)
     check("a first run says the estimate is assumed",
-          "assumes 2s" in first, first)
+          "۲ ثانیه برای هر پیام فرض کرده" in first, first)
 
 
 def main() -> int:

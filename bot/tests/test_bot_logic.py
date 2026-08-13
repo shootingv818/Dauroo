@@ -218,18 +218,18 @@ def test_cards() -> None:
     check("home has no version row", "Version" not in home, home)
     check("home has no bot-online row", "online" not in home)
     check("home has no progress bar", "▰" not in home and "%" not in home)
-    check("home splits ready accounts", "7 ready" in home, home)
-    check("home shows sendable contacts", "1,094 sendable" in home)
-    check("home shows the last run", "502 sent" in home and "2 failed" in home)
-    check("home keeps the API/ping row", "563 ms" in home)
+    check("home splits ready accounts", "7 آماده" in home, home)
+    check("home shows sendable contacts", "1,094 قابل ارسال" in home)
+    check("home shows the last run", "502 موفق" in home and "2 ناموفق" in home)
+    check("home keeps the API/ping row", "563ms" in home)
 
     empty = cards.panel_home(0, 0, None)
-    check("empty home is honest", "none yet" in empty and "nothing set" in empty, empty)
+    check("empty home is honest", "هنوز هیچ" in empty and "تنظیم نشده" in empty, empty)
 
     panel = cards.account_panel("acc", "98912", 1414, 20, "bridge", False,
                                 saved=1094, saved_age=0.2, meta_age=50.0, pending=300)
-    check("account panel dates the Eitaa number", "measured" in panel, panel)
-    check("account panel shows already-sent", "300 got the current content" in panel)
+    check("account panel dates the Eitaa number", "اندازه‌گیری" in panel, panel)
+    check("account panel shows already-sent", "300 محتوای فعلی را گرفته‌اند" in panel)
 
     err = cards.error_card("send", "acc", code="X", detail="token: abc123 leaked")
     check("secrets are redacted in cards", "abc123" not in err, err)
