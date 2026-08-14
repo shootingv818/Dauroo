@@ -1295,9 +1295,14 @@ async def amain() -> None:
                                 on_event=relay.make_event_sink(logbus))
         try:
             up = await relay.manager.start()
-            print(f"relay tunnel: {'up' if up else 'retrying'}", flush=True)
+            print(f"relay tunnel: {'up' if up else 'not up yet'}", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[relay start] {exc}", flush=True)
+        # مثل ربات مالک: تا تونل آماده نشده به تلگرام وصل نشو.
+        if not await relay.manager.wait_until_up():
+            print("[relay] تونل بالا نیامد — خروج تا systemd دوباره تلاش کند",
+                  flush=True)
+            raise SystemExit(1)
 
     await bot.start(bot_token=config.CUSTOMER_BOT_TOKEN)
     logbus.bind(bot, config.OWNER_ID)

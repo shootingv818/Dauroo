@@ -14,10 +14,9 @@
 Description=Dauroo customer bot (Eitaa SaaS) + relay tunnel
 After=network-online.target
 Wants=network-online.target
-# این دو کلید به **[Unit]** تعلق دارند نه [Service] (در [Service] فقط با
-# «Unknown key name … ignoring» نادیده گرفته می‌شوند).
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# بی‌نهایت تلاش (0). دلیلِ کامل در dauroo-owner.service نوشته شده: محدودیتِ
+# نرخ، سرویسِ همیشه-روشن را بعد از چند کرشِ گذرا برای همیشه مرده می‌گذاشت.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -29,7 +28,9 @@ Environment=MODE=customer
 ExecStart=/opt/dauroo/venv/bin/python main.py
 
 Restart=always
-RestartSec=5
+# ۱۰ ثانیه، نه ۵: هر استارت یک اتصالِ SSH تازه به relay است، پس
+# کرشِ پیاپی نباید به sshdِ آن سرور فشار بیاورد.
+RestartSec=10
 
 # مرورگرها اینجا زیرپردازه‌ی جدا (Chromium) هستند و رمِ زیادی می‌خورند؛ پس این
 # پروسه در فشارِ رم، کاندیدای معقول‌تری برای OOM است تا پروسه‌ی مالک — ولی هنوز

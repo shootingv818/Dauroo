@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -638,6 +639,64 @@ def test_slow_does_not_kill_a_healthy_lone_relay() -> None:
           RelayManager(local_port=1)._has_alternative() is True)
 
 
+def test_wait_until_up() -> None:
+    """صبر برای تونل، به‌جای مردن و افتادن در حلقه‌ی ری‌استارت."""
+    section("wait_until_up: صبر می‌کند تا تونل بیاید")
+    key = config.relay_secret_key()
+    _fresh_relays(key, [("w1", 22, 0, "pw")])
+
+    # حالتِ ۱: تونل از قبل بالاست → فوراً True.
+    async def s1():
+        mgr = RelayManager(local_port=1080, connector=make_connector(fail_hosts=set()))
+        await mgr.reconnect()
+        got = await mgr.wait_until_up(timeout=2)
+        await mgr.stop()
+        return got
+
+    check("با تونلِ بالا فوراً True می‌دهد", run(s1()) is True)
+
+    # حالتِ ۲: تونل نیست و نمی‌آید → با timeout برمی‌گردد، معلق نمی‌ماند.
+    async def s2():
+        mgr = RelayManager(local_port=1080, connector=make_connector(fail_all=True))
+        t0 = time.monotonic()
+        got = await mgr.wait_until_up(timeout=1.5)
+        return got, time.monotonic() - t0
+
+    got, took = run(s2())
+    check("بدونِ تونل، False می‌دهد", got is False)
+    check("در حدِ timeout برمی‌گردد (معلق نمی‌ماند)", took < 6, f"{took:.1f}s")
+
+    # حالتِ ۳: تونل با تأخیر می‌آید → باید ببیندش، نه اینکه زود تسلیم شود.
+    async def s3():
+        mgr = RelayManager(local_port=1080, connector=make_connector(fail_hosts=set()))
+
+        async def late_connect():
+            await asyncio.sleep(1.2)
+            async with mgr._lock():
+                await mgr._select_and_connect()
+
+        task = asyncio.ensure_future(late_connect())
+        got = await mgr.wait_until_up(timeout=8)
+        await task
+        await mgr.stop()
+        return got
+
+    check("تونلی که با تأخیر می‌آید را می‌بیند", run(s3()) is True)
+
+    # حالتِ ۴: stop در میانه → صبر تمام می‌شود (بی‌نهایت گیر نمی‌کند).
+    async def s4():
+        mgr = RelayManager(local_port=1080, connector=make_connector(fail_all=True))
+
+        async def stopper():
+            await asyncio.sleep(0.5)
+            mgr._stopping = True
+
+        asyncio.ensure_future(stopper())
+        return await mgr.wait_until_up(timeout=None)
+
+    check("با stop، صبرِ بی‌نهایت هم تمام می‌شود", run(s4()) is False)
+
+
 def test_proxy_shape_matches_telethon() -> None:
     """قالبِ پروکسی باید با امضای واقعیِ Telethon بخواند.
 
@@ -785,6 +844,7 @@ def main_() -> int:
     test_no_candidates_and_backoff()
     test_start_stop_status()
     test_slow_does_not_kill_a_healthy_lone_relay()
+    test_wait_until_up()
     test_proxy_shape_matches_telethon()
     test_no_tunnel_leak_under_concurrency()
     test_owner_panel_wired()

@@ -578,6 +578,40 @@ class RelayManager:
             await self._teardown_tunnel()
             return await self._select_and_connect()
 
+    async def wait_until_up(self, timeout: float | None = None,
+                            log_every: float = 15.0) -> bool:
+        """تا برقرارشدنِ تونل صبر می‌کند. `True` اگر بالا آمد.
+
+        **چرا لازم است:** روی هاستِ ایران، تلگرام فقط از داخلِ تونل در دسترس است.
+        اگر `bot.start()` را قبل از آماده‌شدنِ تونل صدا بزنیم، شکست می‌خورد و
+        پروسه می‌میرد؛ بعد systemd ری‌استارت می‌کند و همین حلقه تکرار می‌شود —
+        یعنی همان «پایدار نیست» که دیده شد.
+
+        صبرکردن **بهتر از مردن** است: حلقه‌ی نگهبان همین حالا در حالِ تلاشِ مجدد
+        با backoffِ نمایی و jitter است. اگر پروسه بمیرد، آن backoff از صفر شروع
+        می‌شود و به sshdِ سرورِ relay فشارِ بیشتری می‌آید. پس اینجا می‌مانیم و
+        می‌گذاریم نگهبان کارش را بکند، و هر چند ثانیه یک خط لاگ می‌دهیم تا از
+        بیرون معلوم باشد منتظرِ چه هستیم.
+
+        `timeout=None` یعنی بی‌نهایت صبر کن (پیش‌فرضِ درست برای این سرویس).
+        """
+        start = time.monotonic()
+        last_log = 0.0
+        while True:
+            if self._tunnel is not None and not self._tunnel.is_closed():
+                return True
+            if self._stopping:
+                return False
+            waited = time.monotonic() - start
+            if timeout is not None and waited >= timeout:
+                return False
+            if waited - last_log >= log_every:
+                last_log = waited
+                cur = db.list_relays(include_disabled=False)
+                print(f"[relay] منتظرِ تونل… {int(waited)}s "
+                      f"({len(cur)} relay ثبت‌شده)", flush=True)
+            await asyncio.sleep(1.0)
+
     def status(self) -> dict:
         current = db.get_relay(self.current_id) if self.current_id else None
         return {
