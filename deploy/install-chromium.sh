@@ -179,14 +179,38 @@ else
             got=0
             for cand in "${CANDS[@]}"; do
                 logf "  try $cand"
-                # --socks5-hostname: حلِ نام هم سمتِ relay انجام شود، نه اینجا.
-                if curl -fsSL --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
-                        --connect-timeout 20 --max-time 900 \
-                        -o "$tmp" "$cand" >>"$LOG" 2>&1; then
+                # `-f` عمداً **نیست**: با -f کرل بی‌صدا شکست می‌خورد و فقط کدِ
+                # خروج می‌دهد، پس «۴۰۳ جغرافیایی» از «قطعِ وسطِ دانلود» قابلِ
+                # تشخیص نبود. اینجا کدِ HTTP و حجمِ دریافتی و خطای کرل را
+                # می‌گیریم و نشان می‌دهیم.
+                #
+                # --retry/-C: فایلِ کروم حدود ۱۷۰ مگ است و از داخلِ یک تونلِ SSH
+                # می‌آید؛ یک قطعیِ کوتاه نباید کلِ دانلود را دور بریزد. ffmpeg
+                # (۲ مگ) موفق شد و کروم نشد، که خودش نشانه‌ی همین است.
+                # --speed-limit/--speed-time: اگر ۳۰ ثانیه زیرِ ۱ کیلوبایت شد،
+                # یعنی عملاً متوقف شده؛ ببند و برو سراغِ آدرسِ بعدی.
+                cerr="/tmp/pw_curl_err.$$"
+                code="$(curl -sSL --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
+                        --connect-timeout 20 --max-time 3600 \
+                        --retry 5 --retry-delay 5 --retry-all-errors \
+                        --speed-limit 1024 --speed-time 30 \
+                        -C - -w '%{http_code}' \
+                        -o "$tmp" "$cand" 2>"$cerr" || true)"
+                rc=$?
+                cmsg="$(tr -d '\r' <"$cerr" | tail -2 | tr '\n' ' ')"
+                rm -f "$cerr"
+                size="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
+                logf "  http=$code rc=$rc size=$size err=$cmsg"
+                # ۲۰۰ یا ۴۱۶ (یعنی از قبل کامل دانلود شده) قبول است.
+                if { [ "$code" = "200" ] || [ "$code" = "206" ] || [ "$code" = "416" ]; } \
+                   && [ "$size" -gt 100000 ]; then
                     got=1
                     break
                 fi
-                warn "نشد: ${cand:0:78}…"
+                warn "نشد (HTTP $code · ${size} بایت): ${cand:0:60}…"
+                [ -n "$cmsg" ] && echo "        ${C}کرل: $cmsg${N}"
+                # فایلِ نیمه‌کاره را نگه ندار، وگرنه -C - دفعه‌ی بعد گیج می‌شود.
+                [ "$size" -lt 100000 ] && rm -f "$tmp"
             done
 
             if [ "$got" -eq 1 ]; then
@@ -213,6 +237,29 @@ else
         warn "نصب از تونل کامل نشد"
         why_failed
     fi
+fi
+
+# --------------------------------------------------------------------------- #
+step "۲b/۴ راهِ دوم-ب: دانلود روی خودِ relay، بعد آوردن با SFTP"
+# --------------------------------------------------------------------------- #
+# اگر دانلودِ SOCKS برای فایلِ بزرگ نشد، این مسیر مشکل را دور می‌زند: دانلود
+# **روی relay** انجام می‌شود (آنجا فیلتری نیست) و فایل با SFTP از همان اتصالِ SSH
+# می‌آید. اعتبارنامه از جدولِ relays خوانده می‌شود، پس رمز جایی تکرار نمی‌شود.
+if sudo -u "$APP_USER" env HOME="/home/$APP_USER" \
+        "$PY" -m relay.fetch --playwright >>"$LOG" 2>&1; then
+    chown -R "$APP_USER:$APP_USER" "/home/$APP_USER/.cache" 2>/dev/null || true
+    if browser_works; then
+        ok "از طریقِ relay نصب شد"
+        echo
+        echo "${G}${B}تمام. سرویس‌ها را ری‌استارت کن:${N}"
+        echo "  sudo systemctl restart dauroo-owner dauroo-customer"
+        exit 0
+    fi
+    warn "دانلود انجام شد ولی مرورگر بالا نیامد"
+    why_failed
+else
+    warn "مسیرِ relay هم جواب نداد (جزئیات در لاگ)"
+    tail -6 "$LOG" | sed 's/^/        /'
 fi
 
 # --------------------------------------------------------------------------- #
