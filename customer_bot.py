@@ -483,8 +483,32 @@ async def _do_login(uid: int, phone: str) -> None:
                 await asyncio.sleep(2)
                 if not manager.is_busy(staging):
                     break
-            logged_in = config.profile_dir(staging).is_dir() and \
-                manager.login_stage(staging) in (None, "done")
+            # سیگنالِ واقعیِ موفقیت، نه `login_stage`.
+            #
+            # `login_stage(...) in (None, "done")` بی‌معنی بود: در `bot/runner.py`
+            # مقدار `"done"` **هرگز** ست نمی‌شود (فقط `awaiting_code`)، و
+            # `_logins.pop()` در `finally` حالت را پاک می‌کند، پس پس از پایانِ
+            # جاب همیشه `None` است. پوشه‌ی پروفایل را هم کروم در همان لحظه‌ی
+            # لانچ می‌سازد. یعنی شرط عملاً همیشه True بود و **هر تلاشِ لاگینی
+            # موفق شمرده می‌شد** — حتی وقتی اصلاً وارد نشده بود.
+            #
+            # شاهدِ واقعی این است که جابِ لاگین چیزی از **API ایتا** خوانده
+            # باشد: مخاطبین یا peers. خودِ موتور هم همین را ملاک می‌گیرد (کارتِ
+            # «LOGIN NOT CONFIRMED» می‌گوید «بروزرسانی مخاطبین را بزن؛ اگر
+            # مخاطبینت را خواند، لاگین کار کرده»).
+            evidence = 0
+            try:
+                evidence = contacts_store.count(staging) or 0
+            except Exception:  # noqa: BLE001
+                evidence = 0
+            if not evidence:
+                try:
+                    from direct import peers as _pk
+                    evidence = _pk.count(staging) or 0
+                except Exception:  # noqa: BLE001
+                    evidence = 0
+            confirmed = bool(evidence)
+            logged_in = config.profile_dir(staging).is_dir()
     except Exception as exc:  # noqa: BLE001
         logged_in = False
         await logbus.emit_error(where="login", customer_id=uid,
@@ -496,6 +520,22 @@ async def _do_login(uid: int, phone: str) -> None:
 
     if logged_in:
         aid = db.add_account(uid, phone)
+
+        # ۱) اول سشنِ مرورگرِ کلیدِ **موقت** را ببند.
+        #
+        # چرا این حیاتی است: استخر سشن را گرم نگه می‌دارد، پس کرومیومِ لاگین
+        # ممکن است هنوز زنده باشد و همان پوشه‌ی پروفایل را قفل کرده باشد. بعد از
+        # rename، جابِ بعدی با کلیدِ نهایی یک کرومیومِ **دوم** روی همان
+        # user-data-dir باز می‌کند — که کروم اجازه نمی‌دهد و نتیجه‌اش سشنِ خالی
+        # است. دقیقاً همین شد: لاگین موفق بود و ۳۸۸ مخاطب خوانده شد، ولی
+        # `save_contacts` بعدش `not_logged_in` داد.
+        try:
+            from capture.pool import pool as _pool
+            await _pool.close_all(staging)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[login promote pool] {exc}", flush=True)
+
+        # ۲) پروفایل را اتمی جابه‌جا کن.
         try:
             src, dst = config.profile_dir(staging), config.profile_dir(str(aid))
             if dst.is_dir():
@@ -503,17 +543,70 @@ async def _do_login(uid: int, phone: str) -> None:
             os.rename(src, dst)          # اتمی: هیچ‌وقت پروفایل نیمه‌ساخته با نام واقعی
         except OSError as exc:
             print(f"[login promote] {exc}", flush=True)
+
+        # ۳) مخاطبین را با کلیدِ واقعی بازنویس.
+        # `contacts()` می‌دهد **دیکشنریِ کامل**؛ `items()` فقط `(title, peer_id)`
+        # است — یک پروجکشنِ ناقص برای حلقه‌ی ارسال.
+        #
+        # قبلاً اشتباهاً `items()` استفاده می‌شد و دو خرابیِ هم‌زمان می‌ساخت:
+        #   ۱. `c.get("access_hash")` روی یک **تاپل** ⇒ AttributeError، و چون
+        #      این تابع در یک `create_task` اجرا می‌شود، asyncio استثنا را
+        #      می‌بلعد؛ پس ارتقا نیمه‌کاره می‌ماند و هیچ خطایی دیده نمی‌شد.
+        #   ۲. حتی اگر کرش نمی‌کرد، `items()` هم `access_hash` و هم شماره را دور
+        #      می‌ریزد، پس مخاطبینِ منتقل‌شده برای فرستنده‌ی سریع بی‌مصرف بودند.
         saved = contacts_store.count(staging) or 0
-        items = contacts_store.items(staging) if saved else []
-        with_hash = sum(1 for c in items if c.get("access_hash") and c.get("peer_id"))
-        # فایل‌های per-account با نام موقت ساخته شده‌اند؛ با کلید واقعی دوباره بنویس.
-        if items:
-            contacts_store.save(str(aid), items)
+        rows_full = contacts_store.contacts(staging) if saved else []
+        with_hash = sum(1 for c in rows_full
+                        if c.get("access_hash") and c.get("peer_id"))
+        if rows_full:
+            contacts_store.save(str(aid), rows_full)
             contacts_store.forget(staging)
+
+        # ۴) فایلِ peers را هم منتقل کن.
+        #
+        # این جا افتاده بود و باعث می‌شد **موتور سریع هرگز آماده نشود**: جابِ
+        # لاگین `access_hash`ها را زیر کلیدِ موقت می‌نویسد (در لاگ:
+        # «🔑 peers ذخیره شد · اکانت: _pending_…»)، ولی فرستنده‌ی سریع با کلیدِ
+        # نهایی می‌خواندشان و چیزی پیدا نمی‌کرد. فایل را جابه‌جا می‌کنیم، نه
+        # اینکه دوباره بسازیم — با `os.replace` اتمی است.
+        try:
+            from direct import peers as _peers
+            psrc, pdst = _peers.peers_path(staging), _peers.peers_path(str(aid))
+            if psrc.is_file():
+                pdst.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(psrc, pdst)
+                moved = _peers.count(str(aid))
+                print(f"[login promote] peers {staging} → {aid}: {moved}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[login promote peers] {exc}", flush=True)
+
         db.set_account_meta(aid, contacts=saved, with_hash=with_hash)
         n = db.count_accounts(uid)
         q = gate.add_quota(uid)
         fast = bool(saved and with_hash >= saved)
+
+        # اگر شاهدی از خواندنِ API نبود، **ادعای موفقیت نکن**. اکانت را نگه
+        # می‌داریم (شاید فقط رابطِ کاربری کند بوده و سشن سالم است — همان حالتی
+        # که موتور «LOGIN NOT CONFIRMED» می‌نامد)، ولی صادقانه می‌گوییم تأیید
+        # نشده و راهِ تأیید را نشان می‌دهیم. قبلاً همیشه «✅ اضافه شد» می‌گفت،
+        # حتی وقتی اکانت اصلاً لاگین نبود.
+        if not confirmed:
+            await logbus.emit(
+                kind="account_unconfirmed", title="⚠️ لاگین تأیید نشد",
+                rows=[f"• اکانت: {aid}",
+                      "• پروفایل ساخته شد ولی هیچ داده‌ای از API ایتا نیامد",
+                      "• یعنی ممکن است سشن کامل نشده باشد"],
+                customer_id=uid, customer_label=label, phone=phone, trace=trace,
+                log_label="لاگین تأیید نشد",
+                safe_title="⚠️ لاگین کامل تأیید نشد",
+                safe_rows=[f"• شماره: {_mask(phone)}",
+                           "• اکانت اضافه شد ولی مطمئن نیستیم سشن کامل است.",
+                           "• «🔄 بروزرسانی مخاطبین» را بزن:",
+                           "• اگر مخاطبینت را خواند، لاگین درست بوده.",
+                           "• اگر نه، حذفش کن و دوباره اضافه کن."],
+                safe_footer=f"▪ {n} از {config.ACCOUNT_CAP} اکانت")
+            return
+
         await logbus.emit(
             kind="account_added", title="✅ اکانت اضافه شد",
             rows=[f"• مخاطبین: {_fa(saved)}" +

@@ -803,6 +803,78 @@ def test_delete_and_reset_actually_work() -> None:
           str(db.owner_totals()["accounts"]))
 
 
+def test_staging_promotion_migrates_everything() -> None:
+    """ارتقای پروفایلِ موقت باید **همه‌ی** فایل‌های آن اکانت را ببرد.
+
+    از یک شکستِ واقعی روی سرور: لاگین موفق بود و ۳۸۸ مخاطب از API خوانده شد،
+    ولی بعدش:
+        • «🔄 مخاطبین بروز شد · مخاطبین: 0 · موتور سریع: آماده نشد»
+        • «خطا · save_contacts · acc=6 · not_logged_in»
+
+    دو علت داشت:
+      ۱. فایلِ `peers` (که `access_hash`ها در آن است) زیر کلیدِ **موقت**
+         می‌ماند، پس فرستنده‌ی سریع با کلیدِ نهایی هیچ‌وقت پیدایش نمی‌کرد.
+      ۲. سشنِ مرورگرِ کلیدِ موقت بسته نمی‌شد، پس کرومیوم پوشه‌ی پروفایل را قفل
+         نگه می‌داشت و جابِ بعدی روی همان پوشه سشنِ خالی می‌دید.
+    """
+    section("ارتقای پروفایلِ موقت: مخاطبین + peers + پروفایل")
+    from bot import contacts_store
+    from direct import peers
+
+    staging = "_pending_989213725238_test01"
+    final = "9001"
+
+    # وضعیتِ بعد از یک لاگینِ موفق: همه‌چیز زیر کلیدِ موقت.
+    config.profile_dir(staging).mkdir(parents=True, exist_ok=True)
+    peers.save_peer(staging, "c1", peers.peer_bytes(111, 222), 111, 222)
+    peers.save_peer(staging, "c2", peers.peer_bytes(333, 444), 333, 444)
+    contacts_store.save(staging, [
+        {"phone": "989120000001", "peer_id": 111, "access_hash": 222},
+        {"phone": "989120000002", "peer_id": 333, "access_hash": 444},
+    ])
+    check("peers زیر کلیدِ موقت ساخته شد", peers.count(staging) == 2)
+    check("peers زیر کلیدِ نهایی هنوز خالی است", peers.count(final) == 0)
+
+    # ---- همان کاری که کدِ ارتقا می‌کند ----
+    src, dst = config.profile_dir(staging), config.profile_dir(final)
+    if dst.is_dir():
+        shutil.rmtree(dst)
+    os.rename(src, dst)
+    # `contacts()` نه `items()`: دومی تاپلِ ناقص می‌دهد و هم کرش می‌کند هم
+    # access_hash را دور می‌ریزد — همان باگی که موتور سریع را از کار انداخته بود.
+    rows_full = contacts_store.contacts(staging) or []
+    check("contacts() دیکشنریِ کامل می‌دهد",
+          bool(rows_full) and isinstance(rows_full[0], dict), str(rows_full[:1]))
+    check("items() تاپلِ ناقص می‌دهد (پس برای save مناسب نیست)",
+          isinstance((contacts_store.items(staging) or [(None,)])[0], tuple))
+    if rows_full:
+        contacts_store.save(final, rows_full)
+        contacts_store.forget(staging)
+    psrc, pdst = peers.peers_path(staging), peers.peers_path(final)
+    if psrc.is_file():
+        pdst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(psrc, pdst)
+
+    check("پروفایل با کلیدِ نهایی وجود دارد", dst.is_dir())
+    check("پروفایلِ موقت باقی نمانده", not src.is_dir())
+    check("مخاطبین با کلیدِ نهایی خوانده می‌شوند",
+          contacts_store.count(final) == 2, str(contacts_store.count(final)))
+    check("peers با کلیدِ نهایی خوانده می‌شوند",
+          peers.count(final) == 2, str(peers.count(final)))
+    check("peers زیر کلیدِ موقت پاک شد", peers.count(staging) == 0)
+    check("targets برای فرستنده‌ی سریع آماده است", len(peers.targets(final)) == 2)
+
+    # و اینکه کدِ واقعی این مهاجرت‌ها را دارد (وگرنه باگ برمی‌گردد).
+    src_txt = (Path(__file__).resolve().parents[2] / "customer_bot.py").read_text(
+        encoding="utf-8")
+    check("customer_bot فایلِ peers را منتقل می‌کند",
+          "peers_path(staging)" in src_txt)
+    check("customer_bot سشنِ کلیدِ موقت را می‌بندد",
+          "close_all(staging)" in src_txt)
+    check("دیگر به login_stage تکیه نمی‌کند",
+          "login_stage(staging) in (None" not in src_txt)
+
+
 def test_live_card_is_bound() -> None:
     """کارت زنده باید کلاینت داشته باشد، وگرنه بی‌صدا هیچ‌وقت رندر نمی‌شود.
 
@@ -912,6 +984,7 @@ def main_() -> int:
     test_owner_never_blocked()
     test_eitaa_creds_extraction()
     test_delete_and_reset_actually_work()
+    test_staging_promotion_migrates_everything()
     test_live_card_is_bound()
     test_bots_import()
 
