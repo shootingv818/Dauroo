@@ -3,63 +3,161 @@
 # install.sh — نصبِ کاملِ Dauroo روی سرورِ خام (اوبونتو/دبیان).
 # ============================================================
 #
-# فرض: سرورِ تازه، هیچ‌چیز نصب نیست. این اسکریپت همه‌چیز را نصب و راه‌اندازی
-# می‌کند: پایتون، venv، وابستگی‌ها، کرومِ Playwright با کتابخانه‌های سیستمی،
-# کاربرِ سرویس، پوشه‌ها، و دو واحدِ systemd.
-#
-# اجرا (با root یا sudo):
+# فرض: سرورِ تازه، هیچ‌چیز نصب نیست.
 #
 #     sudo bash deploy/install.sh
 #
-# اسکریپت idempotent است: هر بار دوباره بزنی، فقط چیزهایی که کم است را می‌سازد.
-# هیچ‌وقت .env موجود را بازنویسی نمی‌کند و هیچ‌وقت داده/پروفایل را پاک نمی‌کند.
+# idempotent است: هر بار دوباره بزنی فقط چیزی که کم است ساخته می‌شود، و
+# `.env` / `data/` / `profiles/` هرگز بازنویسی یا پاک نمی‌شوند.
 #
-# بعد از نصب: .env را پر کن، بعد
-#     sudo systemctl enable --now dauroo-owner dauroo-customer
+# فقط تشخیص، بدونِ تغییر:   sudo bash deploy/install.sh --check
+#
+# ---- لاگ‌یابی ----
+# هر گام (۱) قبل از اجرا پیش‌نیازش را چک می‌کند، (۲) بعد از اجرا **نتیجه‌اش را
+# تأیید می‌کند** نه فقط کدِ خروج، و (۳) اگر شکست خورد می‌گوید کدام دستور در کدام
+# خط بود و کجای لاگ را بخوانی. همه‌چیز با زمان در این فایل می‌نشیند:
+#
+#     /var/log/dauroo-install.log
+#
+# در پایان یک «کارنامه» چاپ می‌شود که نشان می‌دهد چه چیزی سالم است و چه چیزی نه،
+# پس اگر وسطش چیزی خراب شد لازم نیست حدس بزنی.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/opt/dauroo}"
 APP_USER="${APP_USER:-dauroo}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+LOG="/var/log/dauroo-install.log"
+CHECK_ONLY=0
+[ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
-# رنگ‌ها (اگر ترمینال پشتیبانی کند)
 if [ -t 1 ]; then
-    R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1m'; N=$'\e[0m'
-else
-    R=""; G=""; Y=""; B=""; N=""
-fi
+    R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; B=$'\e[1m'; N=$'\e[0m'
+else R=""; G=""; Y=""; C=""; B=""; N=""; fi
 
-step() { echo; echo "${B}▶ $*${N}"; }
-ok()   { echo "  ${G}✅${N} $*"; }
-warn() { echo "  ${Y}⚠️${N}  $*"; }
-die()  { echo "  ${R}❌ $*${N}" >&2; exit 1; }
+#: کارنامه: نامِ گام → وضعیت
+declare -a REPORT=()
+CURRENT_STEP="راه‌اندازی"
+FAILED=0
 
+ts()   { date '+%Y-%m-%d %H:%M:%S'; }
+logf() { printf '[%s] %s\n' "$(ts)" "$*" >>"$LOG"; }
+step() { CURRENT_STEP="$*"; echo; echo "${B}▶ $*${N}"; logf "STEP $*"; }
+ok()   { echo "  ${G}✅${N} $*"; logf "  OK  $*"; REPORT+=("ok|$CURRENT_STEP|$*"); }
+warn() { echo "  ${Y}⚠️${N}  $*"; logf "  WARN $*"; REPORT+=("warn|$CURRENT_STEP|$*"); }
+bad()  { echo "  ${R}❌${N} $*"; logf "  FAIL $*"; REPORT+=("bad|$CURRENT_STEP|$*"); FAILED=1; }
+die()  { echo; echo "${R}${B}متوقف شد: $*${N}" >&2; logf "DIE $*"; show_report; exit 1; }
+
+# هر خطای غیرمنتظره: بگو کدام خط و کدام دستور، و کجا را بخوان.
+on_err() {
+    local code=$? line=$1 cmd=$2
+    echo
+    echo "${R}${B}✖ خطا در گام «$CURRENT_STEP»${N}"
+    echo "${R}  خط $line — دستور: ${cmd}${N}"
+    echo "${R}  کدِ خروج: $code${N}"
+    echo "${C}  لاگِ کامل:  tail -40 $LOG${N}"
+    logf "ERROR line=$line code=$code cmd=$cmd"
+    show_report
+    exit "$code"
+}
+trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
+
+# اجرای یک دستور با لاگِ کامل؛ خروجی‌اش در لاگ می‌رود نه روی صفحه.
+run() {
+    logf "  \$ $*"
+    if "$@" >>"$LOG" 2>&1; then return 0; fi
+    return 1
+}
+
+show_report() {
+    echo
+    echo "${B}───────────── کارنامه ─────────────${N}"
+    local o=0 w=0 b=0
+    for row in "${REPORT[@]:-}"; do
+        [ -n "$row" ] || continue
+        # هر `local` جدا: bash همه‌ی سمت‌راست‌های یک `local` را **قبل** از
+        # انتساب بسط می‌دهد، پس ارجاع به `rest` در همان خط زیرِ `set -u`
+        # خطای «unbound variable» می‌دهد و کارنامه را خراب می‌کند.
+        local st="${row%%|*}"
+        local rest="${row#*|}"
+        local stp="${rest%%|*}"
+        local msg="${rest#*|}"
+        case "$st" in
+            ok)   echo "  ${G}✅${N} $msg"; o=$((o+1)) ;;
+            warn) echo "  ${Y}⚠️ ${N} $msg  ${C}[$stp]${N}"; w=$((w+1)) ;;
+            bad)  echo "  ${R}❌${N} $msg  ${C}[$stp]${N}"; b=$((b+1)) ;;
+        esac
+    done
+    echo "${B}───────────────────────────────────${N}"
+    echo "  سالم: ${G}$o${N} · هشدار: ${Y}$w${N} · خراب: ${R}$b${N}"
+    echo "  لاگ: $LOG"
+}
+
+# --------------------------------------------------------------------------- #
 [ "$(id -u)" -eq 0 ] || die "با sudo اجرا کن:  sudo bash deploy/install.sh"
-
-# مسیرِ سورس = پوشه‌ی والدِ همین اسکریپت
+mkdir -p "$(dirname "$LOG")"; : >>"$LOG"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "${B}نصبِ Dauroo${N}"
+echo "${B}نصبِ Dauroo${N}  $( [ $CHECK_ONLY = 1 ] && echo "${C}(حالتِ تشخیص، بدونِ تغییر)${N}" )"
 echo "───────────────────────────────"
 echo "  سورس : $SRC_DIR"
 echo "  نصب  : $APP_DIR"
 echo "  کاربر: $APP_USER"
+echo "  لاگ  : $LOG"
+logf "=== install start (check_only=$CHECK_ONLY) src=$SRC_DIR dst=$APP_DIR ==="
+
+# --------------------------------------------------------------------------- #
+step "۰/۹ پیش‌بررسی محیط"
+# --------------------------------------------------------------------------- #
+. /etc/os-release 2>/dev/null || true
+ok "سیستم: ${PRETTY_NAME:-نامشخص}"
+command -v apt-get >/dev/null 2>&1 || die "apt-get نیست — این اسکریپت برای اوبونتو/دبیان است"
+# رم و دیسک: کروم روی رمِ کم بالا نمی‌آید و نصبِ کرومیوم ~۵۰۰ مگ دیسک می‌خواهد.
+MEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+DISK_MB=$(df -Pm / | awk 'NR==2{print $4}')
+[ "$MEM_MB" -ge 1800 ] && ok "رم: ${MEM_MB} مگ" || warn "رم کم است (${MEM_MB} مگ) — مرورگر ممکن است بالا نیاید"
+[ "$DISK_MB" -ge 3000 ] && ok "دیسکِ آزاد: $((DISK_MB/1024)) گیگ" || warn "دیسکِ آزاد کم است ($((DISK_MB)) مگ)"
+if ping -c1 -W3 deb.debian.org >/dev/null 2>&1 || ping -c1 -W3 archive.ubuntu.com >/dev/null 2>&1; then
+    ok "دسترسی به مخزنِ بسته‌ها"
+else warn "مخزنِ بسته‌ها پاسخ نداد — اگر apt شکست خورد، دلیلش همین است"; fi
+
+if [ $CHECK_ONLY = 1 ]; then
+    step "تشخیصِ نصبِ موجود"
+    [ -d "$APP_DIR" ] && ok "$APP_DIR هست" || bad "$APP_DIR نیست"
+    [ -x "$APP_DIR/venv/bin/python" ] && ok "venv هست" || bad "venv نیست"
+    [ -f "$APP_DIR/.env" ] && ok ".env هست" || bad ".env نیست"
+    for u in dauroo-owner dauroo-customer; do
+        if systemctl list-unit-files | grep -q "^$u.service"; then
+            st=$(systemctl is-active "$u" 2>/dev/null || true)
+            [ "$st" = active ] && ok "$u: فعال" || bad "$u: $st"
+        else bad "$u نصب نیست"; fi
+    done
+    if [ -x "$APP_DIR/venv/bin/python" ]; then
+        for m in telethon asyncssh playwright; do
+            "$APP_DIR/venv/bin/python" -c "import $m" 2>/dev/null && ok "$m import می‌شود" || bad "$m نیست"
+        done
+    fi
+    show_report; exit $FAILED
+fi
 
 # --------------------------------------------------------------------------- #
 step "۱/۹ بسته‌های سیستمی"
 # --------------------------------------------------------------------------- #
-if ! command -v apt-get >/dev/null 2>&1; then
-    die "این اسکریپت برای اوبونتو/دبیان است (apt-get پیدا نشد)."
-fi
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+run apt-get update -qq || warn "apt-get update خطا داد (ادامه می‌دهیم)"
 # python3-venv جداست و بدونش venv ساخته نمی‌شود؛ build-essential برای هر
-# وابستگی‌ای که چرخِ آماده ندارد؛ ca-certificates برای TLS.
-apt-get install -y -qq \
-    python3 python3-venv python3-pip python3-dev \
-    build-essential ca-certificates curl git tzdata >/dev/null
-ok "پایتون و ابزارهای ساخت نصب شد ($("$PYTHON_BIN" -V 2>&1))"
+# وابستگی‌ای که چرخِ آماده ندارد.
+if run apt-get install -y -qq python3 python3-venv python3-pip python3-dev \
+        build-essential ca-certificates curl git tzdata; then
+    ok "بسته‌ها نصب شد"
+else
+    die "نصبِ بسته‌ها شکست خورد — ببین:  tail -40 $LOG"
+fi
+# تأیید: خودِ پایتون و venv واقعاً کار می‌کنند؟
+"$PYTHON_BIN" -V >/dev/null 2>&1 || die "$PYTHON_BIN اجرا نمی‌شود"
+ok "پایتون: $("$PYTHON_BIN" -V 2>&1)"
+"$PYTHON_BIN" -c "import venv" 2>/dev/null && ok "ماژول venv موجود" \
+    || die "python3-venv نصب نشد — بدونش venv ساخته نمی‌شود"
 
 # --------------------------------------------------------------------------- #
 step "۲/۹ کاربرِ سرویس"
@@ -67,9 +165,9 @@ step "۲/۹ کاربرِ سرویس"
 if id "$APP_USER" >/dev/null 2>&1; then
     ok "کاربر $APP_USER از قبل هست"
 else
-    # کاربرِ سیستمی بدونِ لاگین: ربات نباید با root اجرا شود.
-    useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
-    ok "کاربر $APP_USER ساخته شد"
+    run useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER" \
+        || die "ساختِ کاربر شکست خورد"
+    id "$APP_USER" >/dev/null 2>&1 && ok "کاربر $APP_USER ساخته شد" || die "کاربر ساخته نشد"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -77,54 +175,67 @@ step "۳/۹ کپیِ کد به $APP_DIR"
 # --------------------------------------------------------------------------- #
 mkdir -p "$APP_DIR"
 if [ "$SRC_DIR" != "$APP_DIR" ]; then
-    # داده‌ها و .env هرگز بازنویسی نمی‌شوند.
-    tar -C "$SRC_DIR" \
-        --exclude=.git --exclude=data --exclude=profiles --exclude=artifacts \
-        --exclude=.env --exclude=__pycache__ --exclude='*.pyc' \
-        -cf - . | tar -C "$APP_DIR" -xf -
+    # .env و داده‌ها استثنا می‌شوند تا اجرای دوباره چیزی را از دست ندهد.
+    tar -C "$SRC_DIR" --exclude=.git --exclude=data --exclude=profiles \
+        --exclude=artifacts --exclude=.env --exclude=__pycache__ \
+        --exclude='*.pyc' --exclude=venv -cf - . 2>>"$LOG" \
+        | tar -C "$APP_DIR" -xf - 2>>"$LOG" || die "کپیِ کد شکست خورد"
     ok "کد کپی شد"
 else
-    ok "همین‌جا نصب می‌شود (سورس = مقصد)"
+    ok "سورس = مقصد، کپی لازم نیست"
 fi
+# تأیید: فایل‌های حیاتی رسیدند؟
+for f in main.py requirements.txt .env.example config.py relay/manager.py; do
+    [ -f "$APP_DIR/$f" ] || die "$f در مقصد نیست — کپی ناقص بوده"
+done
+ok "فایل‌های حیاتی موجودند"
 
 # --------------------------------------------------------------------------- #
 step "۴/۹ venv و وابستگی‌های پایتون"
 # --------------------------------------------------------------------------- #
 if [ ! -x "$APP_DIR/venv/bin/python" ]; then
-    "$PYTHON_BIN" -m venv "$APP_DIR/venv"
+    run "$PYTHON_BIN" -m venv "$APP_DIR/venv" || die "ساختِ venv شکست خورد"
     ok "venv ساخته شد"
-else
-    ok "venv از قبل هست"
-fi
+else ok "venv از قبل هست"; fi
 PY="$APP_DIR/venv/bin/python"
-"$PY" -m pip install --upgrade pip -q
-# asyncssh در requirements.txt هست (برای تونلِ relay).
-"$PY" -m pip install -q -r "$APP_DIR/requirements.txt"
-ok "وابستگی‌ها نصب شد (telethon، playwright، asyncssh)"
+[ -x "$PY" ] || die "venv/bin/python اجرایی نیست"
+run "$PY" -m pip install --upgrade pip -q || warn "ارتقاء pip نشد (مهم نیست)"
+if run "$PY" -m pip install -q -r "$APP_DIR/requirements.txt"; then
+    ok "وابستگی‌ها نصب شد"
+else
+    die "نصبِ وابستگی‌ها شکست خورد — ببین:  tail -40 $LOG"
+fi
+# تأیید تک‌تک، چون «pip موفق شد» با «import می‌شود» یکی نیست.
+for m in telethon asyncssh; do
+    if "$PY" -c "import $m" 2>>"$LOG"; then
+        ok "$m: $("$PY" -c "import $m;print(getattr($m,'__version__','?'))" 2>/dev/null)"
+    else
+        bad "$m import نمی‌شود — بدونش $( [ $m = asyncssh ] && echo 'تونلِ relay' || echo 'ربات') کار نمی‌کند"
+    fi
+done
 
 # --------------------------------------------------------------------------- #
-step "۵/۹ کرومِ Playwright + کتابخانه‌های سیستمی"
+step "۵/۹ کرومیومِ Playwright"
 # --------------------------------------------------------------------------- #
-# `--with-deps` خودش کتابخانه‌های سیستمیِ لازمِ کروم را با apt نصب می‌کند؛ این
-# همان چیزی است که روی سرورِ خام معمولاً جا می‌افتد و بعد کروم بی‌دلیل بالا
-# نمی‌آید. اگر شکست خورد، نصب را متوقف نمی‌کنیم: موتورِ سریع (بدون مرورگر) باز
-# هم کار می‌کند و می‌شود بعداً درستش کرد.
-if "$PY" -m playwright install --with-deps chromium >/tmp/pw.log 2>&1; then
+# `--with-deps` کتابخانه‌های سیستمیِ کروم را هم با apt نصب می‌کند؛ همان چیزی که
+# روی سرورِ خام جا می‌افتد و بعد کروم بی‌دلیل بالا نمی‌آید.
+if run "$PY" -m playwright install --with-deps chromium; then
     ok "کرومیوم نصب شد"
 else
-    warn "نصبِ کرومیوم شکست خورد (لاگ: /tmp/pw.log)"
-    warn "موتورِ «سریع» بدونِ مرورگر کار می‌کند؛ بعداً این را اجرا کن:"
-    warn "  $PY -m playwright install --with-deps chromium"
+    warn "نصبِ کرومیوم شکست خورد — موتورِ «سریع» بدونِ مرورگر کار می‌کند"
+    warn "بعداً:  $PY -m playwright install --with-deps chromium"
 fi
-# کروم را در HOME کاربرِ سرویس هم قابلِ دسترس کن (Playwright آن را در HOME
-# کاربری که نصب کرده می‌گذارد؛ اگر با root نصب شده، مسیرش /root است و کاربرِ
-# سرویس نمی‌بیند).
-PW_CACHE="/home/$APP_USER/.cache/ms-playwright"
-if [ -d /root/.cache/ms-playwright ] && [ ! -d "$PW_CACHE" ]; then
+# کروم در HOME کاربری می‌نشیند که نصبش کرده (اینجا root)، پس کاربرِ سرویس
+# نمی‌بیندش. کپی‌اش کن، وگرنه هر جابِ مرورگری شکست می‌خورد.
+PW_SRC="/root/.cache/ms-playwright"
+PW_DST="/home/$APP_USER/.cache/ms-playwright"
+if [ -d "$PW_SRC" ] && [ ! -d "$PW_DST" ]; then
     mkdir -p "/home/$APP_USER/.cache"
-    cp -a /root/.cache/ms-playwright "$PW_CACHE"
-    ok "کرومیوم برای کاربرِ سرویس کپی شد"
+    cp -a "$PW_SRC" "$PW_DST" && ok "کرومیوم برای کاربرِ سرویس کپی شد"
 fi
+if [ -d "$PW_DST" ] || [ -d "$PW_SRC" ]; then
+    ok "کرومیوم در دسترس است"
+else warn "کرومیوم پیدا نشد — جاب‌های مرورگری کار نمی‌کنند"; fi
 
 # --------------------------------------------------------------------------- #
 step "۶/۹ پوشه‌ها و .env"
@@ -132,14 +243,12 @@ step "۶/۹ پوشه‌ها و .env"
 mkdir -p "$APP_DIR"/{data,profiles,artifacts}
 if [ ! -f "$APP_DIR/.env" ]; then
     cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-    # کلیدِ رمزنگاریِ رمزِ relay را خودکار بساز، تا هیچ‌وقت رمز بی‌محافظت نماند.
     KEY="$(head -c 32 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_')"
-    if grep -q '^RELAY_SECRET_KEY=' "$APP_DIR/.env"; then
-        sed -i "s|^RELAY_SECRET_KEY=.*|RELAY_SECRET_KEY=$KEY|" "$APP_DIR/.env"
-    else
-        echo "RELAY_SECRET_KEY=$KEY" >> "$APP_DIR/.env"
-    fi
-    ok ".env از نمونه ساخته شد + RELAY_SECRET_KEY تولید شد"
+    # از ENVIRON، نه `-v`: هرچند این کلید base64 url-safe است و `\` ندارد، همان
+    # الگوی امنِ configure.sh را نگه می‌داریم تا کسی بعداً کورکورانه کپی نکند.
+    AWK_V="$KEY" awk 'BEGIN{FS=OFS="="} $1=="RELAY_SECRET_KEY"{print "RELAY_SECRET_KEY=" ENVIRON["AWK_V"]; next}{print}' \
+        "$APP_DIR/.env" > "$APP_DIR/.env.t" && mv "$APP_DIR/.env.t" "$APP_DIR/.env"
+    ok ".env ساخته شد + RELAY_SECRET_KEY تولید شد"
     NEED_ENV=1
 else
     ok ".env از قبل هست (دست‌نخورده ماند)"
@@ -147,76 +256,69 @@ else
 fi
 chmod 600 "$APP_DIR/.env"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" "/home/$APP_USER" 2>/dev/null || true
-ok "دسترسی‌ها تنظیم شد (.env فقط برای مالکش خواندنی)"
+ok "دسترسی‌ها تنظیم شد"
 
 # --------------------------------------------------------------------------- #
 step "۷/۹ واحدهای systemd"
 # --------------------------------------------------------------------------- #
 for unit in dauroo-owner dauroo-customer; do
     src="$APP_DIR/deploy/$unit.service"
-    [ -f "$src" ] || die "$src پیدا نشد"
-    # مسیرها/کاربر را با مقادیرِ واقعیِ همین نصب جایگزین کن.
-    sed -e "s|/opt/dauroo|$APP_DIR|g" \
-        -e "s|^User=.*|User=$APP_USER|" \
-        -e "s|^Group=.*|Group=$APP_USER|" \
-        "$src" > "/etc/systemd/system/$unit.service"
+    [ -f "$src" ] || die "$src نیست"
+    sed -e "s|/opt/dauroo|$APP_DIR|g" -e "s|^User=.*|User=$APP_USER|" \
+        -e "s|^Group=.*|Group=$APP_USER|" "$src" > "/etc/systemd/system/$unit.service"
 done
-systemctl daemon-reload
-ok "dauroo-owner و dauroo-customer نصب شدند"
+run systemctl daemon-reload || die "daemon-reload شکست خورد"
+# always-on: هم فعال (بعد از ری‌بوت بالا بیاید) هم Restart=always در یونیت.
+run systemctl enable dauroo-owner dauroo-customer || warn "enable شکست خورد"
+for unit in dauroo-owner dauroo-customer; do
+    systemctl is-enabled "$unit" >/dev/null 2>&1 \
+        && ok "$unit نصب و برای بوت فعال شد" || bad "$unit فعال نشد"
+done
 
 # --------------------------------------------------------------------------- #
 step "۸/۹ تستِ سلامتِ نصب"
 # --------------------------------------------------------------------------- #
 cd "$APP_DIR"
-if sudo -u "$APP_USER" "$PY" -c "
-import telethon, asyncssh
-print('  telethon', telethon.__version__)
-print('  asyncssh', asyncssh.__version__)
-import playwright; print('  playwright ok')
-" 2>/dev/null; then
-    ok "کتابخانه‌ها درست import می‌شوند"
+TMPD="/tmp/dauroo_check_$$"
+if sudo -u "$APP_USER" env DATA_DIR="$TMPD" PROFILES_DIR="$TMPD/p" \
+        ARTIFACTS_DIR="$TMPD/a" "$PY" -m bot.tests.test_relay >>"$LOG" 2>&1; then
+    ok "تستِ داخلیِ relay سبز است"
 else
-    warn "بعضی کتابخانه‌ها import نشدند — بالاتر را ببین"
+    bad "تستِ داخلیِ relay رد نشد — ببین:  tail -60 $LOG"
 fi
-# تستِ آفلاینِ خودِ پروژه (بدونِ شبکه): اگر این سبز شد، کد سالم نصب شده.
-if sudo -u "$APP_USER" env DATA_DIR=/tmp/dauroo_check_$$ \
-        "$PY" -m bot.tests.test_relay >/tmp/dauroo_test.log 2>&1; then
-    ok "تستِ داخلیِ relay سبز است ($(grep -c '  PASS' /tmp/dauroo_test.log) چک)"
+rm -rf "$TMPD" 2>/dev/null || true
+# config واقعاً بارگذاری می‌شود؟ (خطای .env اینجا لو می‌رود، نه سرِ استارت)
+if sudo -u "$APP_USER" "$PY" -c "from config import config; print(config.MODE)" >>"$LOG" 2>&1; then
+    ok "config و .env بارگذاری می‌شوند"
 else
-    warn "تستِ داخلی رد نشد (لاگ: /tmp/dauroo_test.log)"
+    bad "بارگذاریِ config شکست خورد — .env را چک کن"
 fi
-rm -rf "/tmp/dauroo_check_$$" 2>/dev/null || true
 
 # --------------------------------------------------------------------------- #
-step "۹/۹ تمام"
+step "۹/۹ گام‌های بعدی"
 # --------------------------------------------------------------------------- #
+show_report
 echo
-echo "───────────────────────────────"
-if [ "$NEED_ENV" = "1" ]; then
-    echo "${Y}${B}گامِ بعدی: .env را پر کن${N}"
-    echo
-    echo "  sudo nano $APP_DIR/.env"
-    echo
-    echo "  اجباری‌ها:"
-    echo "    API_ID، API_HASH        (از my.telegram.org)"
-    echo "    OWNER_BOT_TOKEN         (از @BotFather)"
-    echo "    CUSTOMER_BOT_TOKEN      (رباتِ دوم از @BotFather)"
-    echo "    OWNER_ID                (آیدیِ عددیِ خودت)"
-    echo "    LOG_GROUP_ID            (گروهِ لاگ، منفی؛ ربات‌ها را ادمین کن)"
-    echo
-    echo "  برای relay (چون سرور ایران است):"
-    echo "    RELAY_ENABLED=1"
-    echo "    RELAY_HOST، RELAY_USER، RELAY_PASSWORD    (VPSِ خارجی)"
-    echo "    RELAY_SECRET_KEY  ← ${G}خودکار ساخته شد${N}"
+echo "${B}───────────── ادامه ─────────────${N}"
+if [ "${NEED_ENV:-0}" = "1" ]; then
+    echo "${Y}${B}۱) تنظیمات را بنویس${N} (یا دستی: nano $APP_DIR/.env)"
+    echo "     sudo API_ID=... API_HASH=... OWNER_BOT_TOKEN=... \\"
+    echo "          CUSTOMER_BOT_TOKEN=... OWNER_ID=... LOG_GROUP_ID=... \\"
+    echo "          RELAY_HOST=... RELAY_PASSWORD=... \\"
+    echo "          bash $APP_DIR/deploy/configure.sh"
     echo
 fi
-echo "${B}تستِ تونل قبل از استارت (توصیه می‌شود):${N}"
-echo "  cd $APP_DIR && sudo -u $APP_USER venv/bin/python -m relay.selfcheck"
+echo "${B}۲) تونل را تست کن${N} (قبل از استارت — سرور ایران است)"
+echo "     cd $APP_DIR && sudo -u $APP_USER venv/bin/python -m relay.selfcheck"
 echo
-echo "${B}استارت:${N}"
-echo "  sudo systemctl enable --now dauroo-owner dauroo-customer"
+echo "${B}۳) استارت${N}"
+echo "     sudo systemctl start dauroo-owner dauroo-customer"
 echo
-echo "${B}دیدنِ لاگ:${N}"
-echo "  journalctl -u dauroo-owner -f"
-echo "  journalctl -u dauroo-customer -f"
-echo "───────────────────────────────"
+echo "${B}۴) لاگِ زنده${N}"
+echo "     journalctl -u dauroo-owner -f"
+echo "     journalctl -u dauroo-customer -f"
+echo
+echo "${B}تشخیصِ بعدی هر وقت خواستی:${N}  sudo bash $APP_DIR/deploy/install.sh --check"
+echo "${B}─────────────────────────────────${N}"
+logf "=== install done failed=$FAILED ==="
+exit "$FAILED"
