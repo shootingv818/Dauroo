@@ -1,0 +1,49 @@
+# ---- مرورگر (موتور bridge) ----
+# کروم را با Playwright می‌راند. کد کپچر/درایور عیناً از پروژه‌ی اصلی آمده.
+#
+# **پین‌شده روی ۱.۴۴.۰ — و این عمدی است، دستکاری نکن.**
+#
+# نسخه‌های جدیدتر کرومیوم را از CDN تازه‌ی پلی‌رایت می‌گیرند:
+#     https://cdn.playwright.dev/.../builds/cft/<ver>/linux64/chrome-linux64.zip
+# این آدرس از ایران در دسترس نیست. روی سرورِ واقعی امتحان شد و همیشه رد شد:
+#     HTTP 403 (۱۹۳ بایتِ XMLِ خطا) — "not available in your location"
+# حتی از داخلِ تونلِ SSH هم نشد، در حالی که فایلِ کوچکِ ffmpeg از همان تونل
+# می‌آمد — پس مسئله دسترسیِ همان مسیرِ CDN بود، نه تونل.
+#
+# ۱.۴۴.۰ از میزبانِ قدیمی و ساختارِ قدیمی استفاده می‌کند که **در دسترس است**:
+#     https://playwright.azureedge.net/builds/chromium/1117/chromium-linux.zip
+# روی همان سرور، ۱۵۶ مگ را مستقیم و بدونِ تونل گرفت.
+#
+# ارتقا فقط وقتی مجاز است که آدرسِ دانلودِ نسخه‌ی جدید از ایران باز شود. کدِ این
+# پروژه به هیچ APIِ بعد از ۱.۴۴ وابسته نیست (فقط launch_persistent_context،
+# add_init_script، evaluate، goto، route، new_cdp_session، wait_for_timeout)،
+# پس پین‌کردن چیزی را از دست نمی‌دهد.
+playwright==1.44.0
+
+# ---- تلگرام ----
+# Telethon هر دو ربات را می‌راند (owner + customer). به API_ID/API_HASH و دو
+# توکن جدا نیاز دارد؛ .env.example را ببین.
+telethon>=1.36.0
+
+# ---- ایمپورت تصاویر ----
+# photo_export/renderer.py عکس‌ها را با کروم headless به PDF می‌برد، پس وابستگی
+# جدیدی نمی‌خواهد. اگر روزی رندر بدون مرورگر شد، reportlab و Pillow لازم می‌شوند.
+
+# ---- relay (تونل SSH به تلگرام؛ فقط اگر RELAY_ENABLED=1) ----
+# SSH بومی روی asyncio: تونل داخلِ همان event loopِ ربات ساخته می‌شود، بدون
+# spawn کردنِ ssh/autossh و بدون systemd. اگر relay را روشن می‌کنی، این لازم است.
+asyncssh>=2.14.0
+
+# کلاینتِ SOCKS برای Telethon. **بدونِ این، پروکسی کار نمی‌کند** — و این را روی
+# سرورِ واقعی به‌سختی فهمیدیم: تونل کامل بالا می‌آمد و selfcheck سبز بود، ولی خودِ
+# ربات با `ModuleNotFoundError: No module named 'socks'` می‌مرد.
+# دلیلش در سورسِ Telethon است (network/connection/connection.py:73):
+#   `_parse_proxy` اگر `python_socks` موجود باشد رشته‌ی "socks5" را می‌فهمد،
+#   وگرنه به مسیرِ PySocks می‌افتد و `from socks import ...` را امتحان می‌کند.
+# Telethon از پایتون ۳.۶ به بعد رسماً python-socks را جای PySocks گذاشته، پس
+# همین درست است (نه PySocks). extraی [asyncio] همان چیزی است که Telethon
+# می‌خواهد، چون اتصال باید async باشد.
+python-socks[asyncio]>=2.4.3
+
+# ---- اختیاری ----
+# cryptg  # رمزنگاری سریع‌تر Telethon (بومی، کامپایل لازم دارد)

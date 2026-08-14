@@ -1,0 +1,58 @@
+# systemd unit برای ربات مالک (Dauroo)
+# =====================================
+# تونلِ relay داخلِ خودِ ربات است، پس تونل را جدا systemd نمی‌کنی — این واحد را
+# systemd می‌کنی و تونل با ربات بالا می‌آید و با ربات ری‌استارت می‌شود.
+#
+# نصب:
+#   sudo cp deploy/dauroo-owner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dauroo-owner
+#   journalctl -u dauroo-owner -f      # دیدنِ لاگ‌ها
+#
+# مسیرها را با محلِ واقعیِ پروژه و venv عوض کن.
+
+[Unit]
+Description=Dauroo owner bot (Eitaa SaaS) + relay tunnel
+# تا شبکه واقعاً بالا نیامده استارت نزن (وگرنه اولین اتصالِ SSH بی‌خود شکست می‌خورد)
+After=network-online.target
+Wants=network-online.target
+# محدودیتِ نرخِ استارت **خاموش** است (0 = بی‌نهایت تلاش).
+#
+# چرا: این کلیدها به [Unit] تعلق دارند و قبلاً اشتباهاً در [Service] بودند، پس
+# systemd نادیده‌شان می‌گرفت و ربات بی‌نهایت ری‌استارت می‌شد. با انتقالِ درست به
+# [Unit] واقعاً اعمال شدند — و آن‌وقت ۵ کرش در ۵ دقیقه سرویس را **برای همیشه
+# مرده** می‌گذاشت. برای رباتی که باید همیشه روشن باشد این بدترین حالت است:
+# علتِ کرش معمولاً گذراست (relay سرِ بوت بالا نیامده، شبکه هنوز آماده نیست) و
+# تسلیم‌شدنِ دائمی یعنی سرویس تا دخالتِ دستی خاموش می‌ماند.
+#
+# پس: بی‌نهایت تلاش، ولی با RestartSec بزرگ‌تر تا کرشِ پیاپی به سرور و به sshd
+# سرورِ relay فشار نیاورد.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=dauroo
+Group=dauroo
+WorkingDirectory=/opt/dauroo
+EnvironmentFile=/opt/dauroo/.env
+# نقش به‌صورت **آرگومان** داده می‌شود، نه با Environment=MODE.
+# چرا: مقادیرِ EnvironmentFile بر Environment= می‌چربند، پس `MODE=owner` داخلِ
+# .env باعث شد سرویسِ مشتری هم ربات مالک را اجرا کند — و آن‌وقت دو پروسه یک
+# فایلِ سشن را باز کردند و به «database is locked» و حلقه‌ی ری‌استارت رسیدند.
+# آرگومان را هیچ فایل محیطی نمی‌تواند بازنویسی کند.
+ExecStart=/opt/dauroo/venv/bin/python main.py owner
+
+# اگر کرش کرد یا relay قطع شد و ربات بیرون آمد، همیشه دوباره بالا بیا.
+Restart=always
+# ۱۰ ثانیه، نه ۵: هر استارت یک اتصالِ SSH تازه به relay است، پس
+# کرشِ پیاپی نباید به sshdِ آن سرور فشار بیاورد.
+RestartSec=10
+
+# --- جدا نگه‌داشتنِ منابع: مسیرِ کنترل نباید زیرِ فشارِ مرورگرها خفه شود ---
+# اولویتِ CPU کمی بالاتر و کمترین احتمالِ کشته‌شدن توسط OOM، چون این پروسه
+# سبک است ولی حیاتی (بدونش هیچ‌چیز به تلگرام نمی‌رسد).
+Nice=-5
+OOMScoreAdjust=-600
+
+[Install]
+WantedBy=multi-user.target

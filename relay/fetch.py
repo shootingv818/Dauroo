@@ -1,0 +1,248 @@
+"""
+relay/fetch.py — دانلود روی سرورِ relay، بعد آوردنش با SFTP.
+============================================================
+
+چرا این وجود دارد: CDN پلی‌رایت از ایران با ۴۰۳ جغرافیایی رد می‌شود، و دانلودِ
+مستقیم از داخلِ تونلِ SOCKS برای فایلِ کوچک (ffmpeg ~۲ مگ) کار کرد ولی برای
+کرومیوم (~۱۷۰ مگ) نه. این مسیر مشکل را از ریشه دور می‌زند:
+
+    ۱) روی خودِ relay (که خارج است) با curl دانلود کن — آنجا فیلتری نیست.
+    ۲) فایل را با SFTP از همان اتصالِ SSH بیاور.
+
+هیچ نرم‌افزار تازه‌ای لازم نیست: `asyncssh` از قبل برای تونل نصب است و SFTP
+دارد؛ `curl` هم روی هر VPS معمولی هست (و اگر نبود، نصبش را امتحان می‌کنیم).
+
+اعتبارنامه‌ی relay از همان جدولِ `relays` خوانده و رمزگشایی می‌شود، پس رمز
+جایی تکرار نمی‌شود.
+
+اجرا:
+    python -m relay.fetch <url> <مسیر-مقصدِ-محلی>
+    python -m relay.fetch --playwright     # همه‌ی بسته‌های پلی‌رایت
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+import db
+from config import config
+from relay import crypto
+
+
+def _p(msg: str = "") -> None:
+    print(msg, flush=True)
+
+
+def _pick_relay():
+    """اولین relayِ فعال، با رمزِ رمزگشایی‌شده."""
+    relays = db.list_relays(include_disabled=False)
+    if not relays:
+        return None, "هیچ relayی در دیتابیس نیست"
+    # همان ترتیبی که مدیر استفاده می‌کند: اولویت صعودی.
+    r = relays[0]
+    pw = ""
+    if r.get("secret_enc"):
+        try:
+            pw = crypto.decrypt(r["secret_enc"], config.relay_secret_key())
+        except Exception as exc:  # noqa: BLE001
+            return None, f"رمزگشاییِ رمز شکست خورد: {exc}"
+    return (r, pw), ""
+
+
+async def fetch_via_relay(url: str, dest: str) -> bool:
+    """`url` را روی relay دانلود و به `dest` منتقل می‌کند."""
+    try:
+        import asyncssh
+    except Exception:  # noqa: BLE001
+        _p("❌ asyncssh نصب نیست")
+        return False
+
+    picked, err = _pick_relay()
+    if not picked:
+        _p(f"❌ {err}")
+        return False
+    r, pw = picked
+    host, port, user = r["host"], int(r["ssh_port"] or 22), r.get("username") or "root"
+    _p(f"• relay: {user}@{host}:{port}")
+
+    remote = "/tmp/pw_" + os.path.basename(url)
+    try:
+        async with asyncssh.connect(host, port=port, username=user, password=pw,
+                                    known_hosts=None) as conn:
+            _p("✅ به relay وصل شد")
+
+            # curl روی relay هست؟ اگر نه، نصبش کن (بی‌صدا، و اگر نشد بی‌خیال).
+            res = await conn.run("command -v curl || command -v wget", check=False)
+            if not (res.stdout or "").strip():
+                _p("• curl/wget روی relay نیست؛ نصبش می‌کنم…")
+                await conn.run(
+                    "apt-get update -qq && apt-get install -y -qq curl", check=False)
+
+            size = 0
+            for cand in url_candidates(url):
+                _p(f"↓ روی relay: {cand[:96]}")
+                # کدِ HTTP را صریح بگیر، تا «۴۰۳» از «قطعِ شبکه» جدا باشد.
+                cmd = (f"curl -sSL --retry 5 --retry-delay 3 "
+                       f"-w '%{{http_code}}' -o {remote!r} {cand!r}")
+                res = await conn.run(cmd, check=False)
+                code = (res.stdout or "").strip()[-3:]
+                st = await conn.run(f"stat -c%s {remote!r} 2>/dev/null || echo 0",
+                                    check=False)
+                try:
+                    size = int((st.stdout or "0").strip())
+                except ValueError:
+                    size = 0
+                # حجم را هم چک کن — یک XML/HTMLِ خطا هم «دانلودِ موفق» به‌نظر
+                # می‌رسد (روی سرور: ۴۰۳ با ۱۹۳ بایت).
+                if code == "200" and size >= 100000:
+                    _p(f"✅ روی relay دانلود شد ({size / 2**20:.1f} مگ)")
+                    break
+                _p(f"   ✗ HTTP {code or '?'} · {size} بایت")
+                if size and size < 100000:
+                    # محتوای خطا را نشان بده؛ همین می‌گوید مشکل مسیر است یا مکان.
+                    head = await conn.run(f"head -c 200 {remote!r}", check=False)
+                    snippet = (head.stdout or "").replace("\n", " ")[:180]
+                    if snippet.strip():
+                        _p(f"   پاسخ: {snippet}")
+                await conn.run(f"rm -f {remote!r}", check=False)
+                size = 0
+            if not size:
+                _p("❌ هیچ آدرسی روی relay جواب نداد")
+                return False
+
+            _p("↓ انتقال با SFTP…")
+            async with conn.start_sftp_client() as sftp:
+                await sftp.get(remote, dest)
+            await conn.run(f"rm -f {remote!r}", check=False)
+
+        local = os.path.getsize(dest) if os.path.exists(dest) else 0
+        if local != size:
+            _p(f"❌ حجمِ منتقل‌شده نمی‌خواند ({local} != {size})")
+            return False
+        _p(f"✅ منتقل شد: {dest}")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _p(f"❌ {exc!r}")
+        return False
+
+
+def _playwright_targets():
+    """[(url, install_dir)] از خودِ `playwright install --dry-run`."""
+    try:
+        out = subprocess.run([sys.executable, "-m", "playwright", "install",
+                              "--dry-run", "chromium"],
+                             capture_output=True, text=True, timeout=120).stdout
+    except Exception as exc:  # noqa: BLE001
+        _p(f"❌ اجرای playwright --dry-run نشد: {exc}")
+        return []
+    urls, dirs = [], []
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("Download url:"):
+            urls.append(s.split(":", 1)[1].strip())
+        elif s.startswith("Install location:"):
+            dirs.append(s.split(":", 1)[1].strip())
+    return list(zip(urls, dirs))
+
+
+def url_candidates(url: str) -> list:
+    """چند آدرسِ ممکن برای یک بسته، به ترتیبِ شانس.
+
+    `--dry-run` آدرسِ **خام** می‌دهد (`cdn.playwright.dev/builds/...`) ولی آنچه
+    خودِ playwright می‌زند شکلِ `dbazure/download/playwright/...` است — روی سرور،
+    ffmpeg با شکلِ dbazure موفق شد و آدرسِ خامِ chrome با **HTTP 403 و ۱۹۳ بایت**
+    رد شد (یعنی یک XMLِ خطا، نه فایل). پس هر دو شکل و آینه‌ی میکروسافت را
+    امتحان می‌کنیم تا اگر یکی مسیرش عوض شده، کلِ نصب زمین نخورد.
+    """
+    out = []
+    if "/dbazure/download/playwright/" in url:
+        out.append(url)
+        out.append(url.replace("/dbazure/download/playwright/builds/", "/builds/"))
+    else:
+        out.append(url.replace("https://cdn.playwright.dev/builds/",
+                               "https://cdn.playwright.dev/dbazure/download/playwright/builds/"))
+        out.append(url)
+    # آینه‌ی میکروسافت، همان چیزی که playwright به‌عنوان fallback دارد.
+    for u in list(out):
+        m = u.replace("https://cdn.playwright.dev/",
+                      "https://playwright.download.prss.microsoft.com/")
+        if m not in out:
+            out.append(m)
+    # یکتا، با حفظِ ترتیب
+    seen, uniq = set(), []
+    for u in out:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
+
+
+async def _playwright_all() -> int:
+    targets = _playwright_targets()
+    if not targets:
+        _p("❌ چیزی برای دانلود پیدا نشد")
+        return 1
+    _p(f"• {len(targets)} بسته")
+    if not shutil.which("unzip"):
+        _p("⚠️  unzip نیست؛ با python باز می‌کنیم")
+    failed = 0
+    for url, dirn in targets:
+        name = os.path.basename(url)
+        exe_found = False
+        # اگر از قبل باز شده، رد کن.
+        for root, _d, files in os.walk(dirn if os.path.isdir(dirn) else "."):
+            if "chrome" in files or "chrome-headless-shell" in files:
+                exe_found = True
+                break
+        if exe_found:
+            _p(f"✅ {name} از قبل هست")
+            continue
+        _p("")
+        _p(f"── {name} ──")
+        tmp = os.path.join(tempfile.gettempdir(), name)
+        if not await fetch_via_relay(url, tmp):
+            failed += 1
+            continue
+        os.makedirs(dirn, exist_ok=True)
+        try:
+            import zipfile
+            with zipfile.ZipFile(tmp) as z:
+                z.extractall(dirn)
+            # بیتِ اجرا: zipfile مجوزها را نگه نمی‌دارد و بدونِ آن پلی‌رایت
+            # می‌گوید فایل نیست/اجرا نمی‌شود.
+            for root, _d, files in os.walk(dirn):
+                for f in files:
+                    if f in ("chrome", "chrome-headless-shell", "ffmpeg-linux") \
+                       or f.endswith(".sh"):
+                        os.chmod(os.path.join(root, f), 0o755)
+            _p(f"✅ باز شد در {dirn}")
+        except Exception as exc:  # noqa: BLE001
+            _p(f"❌ بازکردن شکست خورد: {exc}")
+            failed += 1
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return 1 if failed else 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args:
+        _p(__doc__ or "")
+        return 2
+    if args[0] == "--playwright":
+        return asyncio.run(_playwright_all())
+    if len(args) < 2:
+        _p("استفاده: python -m relay.fetch <url> <مقصد>")
+        return 2
+    return 0 if asyncio.run(fetch_via_relay(args[0], args[1])) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

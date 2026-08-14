@@ -1,0 +1,44 @@
+# systemd unit برای ربات مشتری (Dauroo)
+# ======================================
+# همان کدبیس، پروسه‌ی دوم. این پروسه تونلِ خودش را روی پورتِ محلیِ +۱ بالا می‌آورد
+# تا با پروسه‌ی مالک تداخل نکند. مرورگرها (کرومِ لاگین/ارسال) اینجا اجرا می‌شوند،
+# پس این واحد سنگین‌تر است.
+#
+# نصب:
+#   sudo cp deploy/dauroo-customer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dauroo-customer
+#   journalctl -u dauroo-customer -f
+
+[Unit]
+Description=Dauroo customer bot (Eitaa SaaS) + relay tunnel
+After=network-online.target
+Wants=network-online.target
+# بی‌نهایت تلاش (0). دلیلِ کامل در dauroo-owner.service نوشته شده: محدودیتِ
+# نرخ، سرویسِ همیشه-روشن را بعد از چند کرشِ گذرا برای همیشه مرده می‌گذاشت.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=dauroo
+Group=dauroo
+WorkingDirectory=/opt/dauroo
+EnvironmentFile=/opt/dauroo/.env
+# نقش به‌صورت آرگومان (توضیحِ کامل در dauroo-owner.service): مقادیرِ
+# EnvironmentFile بر Environment= می‌چربند، پس MODE داخلِ .env این سرویس را هم
+# به ربات مالک تبدیل می‌کرد.
+ExecStart=/opt/dauroo/venv/bin/python main.py customer
+
+Restart=always
+# ۱۰ ثانیه، نه ۵: هر استارت یک اتصالِ SSH تازه به relay است، پس
+# کرشِ پیاپی نباید به sshdِ آن سرور فشار بیاورد.
+RestartSec=10
+
+# مرورگرها اینجا زیرپردازه‌ی جدا (Chromium) هستند و رمِ زیادی می‌خورند؛ پس این
+# پروسه در فشارِ رم، کاندیدای معقول‌تری برای OOM است تا پروسه‌ی مالک — ولی هنوز
+# نه اولِ صف. سقفِ رمِ کلِ سرویس (مرورگرها) را در صورت نیاز اینجا محدود کن:
+# MemoryMax=9G
+OOMScoreAdjust=-100
+
+[Install]
+WantedBy=multi-user.target
