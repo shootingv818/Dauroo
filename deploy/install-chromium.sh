@@ -113,6 +113,17 @@ if CHROME_PATH="$EXISTING_CHROME" browser_works; then
     ok "کرومیوم از قبل سالم است — کاری لازم نیست"
     exit 0
 fi
+# اگر CHROME_PATH ست است ولی کار نمی‌کند، و کرومیومِ **خودِ پلی‌رایت** کار
+# می‌کند، آن خط را پاک کن. وگرنه یک CHROME_PATHِ خرابِ باقی‌مانده از تلاشِ قبلی
+# (مثلاً stubِ snap) روی نصبِ سالم را می‌پوشاند و لاگین باز هم شکست می‌خورد.
+if [ -n "$EXISTING_CHROME" ] && CHROME_PATH="" browser_works; then
+    sed -i 's|^CHROME_PATH=.*|CHROME_PATH=|' "$APP_DIR/.env"
+    ok "CHROME_PATHِ خراب پاک شد؛ کرومیومِ خودِ پلی‌رایت سالم است"
+    echo
+    echo "${G}${B}تمام. سرویس‌ها را ری‌استارت کن:${N}"
+    echo "  sudo systemctl restart dauroo-owner dauroo-customer"
+    exit 0
+fi
 warn "مرورگر بالا نمی‌آید؛ می‌رویم سرِ نصب"
 CHROME_PATH="$EXISTING_CHROME" why_failed
 
