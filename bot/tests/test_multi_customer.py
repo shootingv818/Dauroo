@@ -699,6 +699,168 @@ def test_eitaa_creds_extraction() -> None:
     os.environ.pop("EITAA_API_HASH", None)
 
 
+class _FakeEvent:
+    """رویدادِ جعلی که هندلرها را واقعاً اجرا می‌کند (کالبک یا پیام)."""
+
+    def __init__(self, uid, data=None, text=""):
+        self.sender_id = uid
+        self.data = data
+        self.raw_text = text
+        self.is_private = True
+        self.answers, self.edits, self.responds = [], [], []
+        self.pattern_match = None
+
+    async def get_sender(self):
+        return types.SimpleNamespace(first_name="تستی", username="tester")
+
+    async def answer(self, t=None, alert=False):
+        self.answers.append(t)
+
+    async def edit(self, t, buttons=None):
+        self.edits.append(t)
+
+    async def respond(self, t, buttons=None):
+        self.responds.append(t)
+
+    async def delete(self):
+        return None
+
+    def replied(self) -> bool:
+        return bool(self.edits or self.responds or self.answers)
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.get_event_loop_policy().new_event_loop().run_until_complete(coro)
+
+
+def test_delete_and_reset_actually_work() -> None:
+    """حذف اکانت و ریست باید **واقعاً** ردیف را پاک کنند.
+
+    از یک شکستِ واقعی: هر دو «هیچ اتفاقی نمی‌افتاد». علتش یک نامِ تابعِ اشتباه در
+    `delete_account_profile` بود (`blocked_store.forget` که وجود ندارد؛ نامش
+    `clear` است). `AttributeError` **قبل** از `db.delete_account()` رخ می‌داد و
+    Telethon استثنای هندلر را می‌بلعد، پس نه حذفی انجام می‌شد و نه خطایی دیده
+    می‌شد.
+
+    این تست هندلر را مثل یک کلیکِ واقعی اجرا می‌کند و **وضعیتِ دیتابیس** را چک
+    می‌کند، نه اینکه فقط استثنا ندهد — چون همان سکوت بود که باگ را پنهان کرد.
+    """
+    section("حذف اکانت و ریست واقعاً انجام می‌شوند")
+    import re as _re
+
+    import customer_bot
+    import owner_bot
+
+    # ---- حذف اکانت (ربات مشتری) ----
+    uid = 5551
+    db.ensure_customer(uid, "حذفی", "del")
+    aid = db.add_account(uid, "989120009991")
+    check("اکانت ساخته شد", db.get_account(uid, aid) is not None)
+
+    ev = _FakeEvent(uid, data=f"delx:{aid}".encode())
+    ev.pattern_match = _re.match(rb"^delx:(\d+)$", ev.data)
+    _run(customer_bot.on_delete_do(ev))
+    check("اکانت واقعاً حذف شد", db.get_account(uid, aid) is None)
+    check("به مشتری جواب داده شد", ev.replied())
+
+    # ---- تابعی که باگ داشت، مستقیم ----
+    from bot import app as _shared
+    aid2 = db.add_account(uid, "989120009992")
+    removed = _shared.delete_account_profile(str(aid2))
+    check("delete_account_profile بدونِ استثنا اجرا می‌شود", isinstance(removed, list))
+
+    # ---- ریست کامل (ربات مالک) ----
+    own = int(config.OWNER_ID)
+    u2 = 6661
+    db.ensure_customer(u2, "ریستی", "res")
+    db.add_account(u2, "989120009993")
+    db.add_account(u2, "989120009994")
+    before = db.owner_totals()["accounts"]
+    check("چند اکانت برای ریست هست", before >= 2, str(before))
+
+    owner_bot.state[own] = {"step": "reset3"}
+    ev2 = _FakeEvent(own, text="ریست")
+    _run(owner_bot.on_message(ev2))
+    check("ریست همه‌ی اکانت‌ها را پاک کرد",
+          db.owner_totals()["accounts"] == 0, str(db.owner_totals()["accounts"]))
+    check("کارتِ نتیجه به مالک رفت", ev2.replied())
+
+    # ---- ریست با «ی» عربی (کیبورد موبایل) ----
+    db.add_account(u2, "989120009995")
+    owner_bot.state[own] = {"step": "reset3"}
+    ev3 = _FakeEvent(own, text="ريست")     # ی عربی
+    _run(owner_bot.on_message(ev3))
+    check("ریست با «ی» عربی هم قبول می‌شود",
+          db.owner_totals()["accounts"] == 0, str(db.owner_totals()["accounts"]))
+
+    # ---- متنِ غلط نباید ریست کند ----
+    db.add_account(u2, "989120009996")
+    owner_bot.state[own] = {"step": "reset3"}
+    ev4 = _FakeEvent(own, text="بله")
+    _run(owner_bot.on_message(ev4))
+    check("متنِ غلط ریست نمی‌کند", db.owner_totals()["accounts"] == 1,
+          str(db.owner_totals()["accounts"]))
+
+
+def test_live_card_is_bound() -> None:
+    """کارت زنده باید کلاینت داشته باشد، وگرنه بی‌صدا هیچ‌وقت رندر نمی‌شود.
+
+    از یک شکستِ واقعی: `LiveCard` از پروژه‌ی اصلی کپی شده بود و مستقیم
+    `bot.send_message` را صدا می‌زد، ولی در این پروژه چنین گلوبالی وجود ندارد.
+    `NameError` داخلِ `except Exception: pass` بلعیده می‌شد، پس هیچ کارت زنده‌ای
+    ساخته نمی‌شد و هیچ خطایی هم دیده نمی‌شد.
+    """
+    section("کارت زنده به کلاینت وصل است")
+    from bot import app as _shared
+
+    check("bot.app تابعِ bind دارد", hasattr(_shared, "bind"))
+    check("bot.app تابعِ client دارد", hasattr(_shared, "client"))
+    check("هیچ ارجاعِ تعریف‌نشده‌ی bot.send_message نمانده",
+          "await bot.send_message" not in
+          Path(_shared.__file__).read_text(encoding="utf-8"))
+
+    class _Cli:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, chat, text, buttons=None):
+            self.sent.append((chat, text))
+            return types.SimpleNamespace(
+                id=len(self.sent),
+                edit=lambda *a, **k: _noop())
+
+    async def _noop():
+        return None
+
+    cli = _Cli()
+    _shared.bind(cli)
+    check("بعد از bind، client برمی‌گردد", _shared.client() is cli)
+
+    async def scenario():
+        # **داخلِ** لوپ ساخته می‌شود: `LiveCard.__init__` یک `asyncio.Event`
+        # می‌سازد و روی پایتون ۳.۹ آن به لوپِ جاری می‌چسبد، پس ساختنش بیرون از
+        # لوپ همان‌جا کرش می‌کند. در کدِ واقعی هم همیشه داخلِ هندلرِ async ساخته
+        # می‌شود، پس این همان مسیرِ واقعی است.
+        lc = _shared.LiveCard(4242, min_interval=0.01)
+        await lc.set("سلام زنده")
+        await lc.flush()
+        # نقاشِ پس‌زمینه را ببند، وگرنه تسکِ سرگردان می‌ماند.
+        lc.close()
+        import asyncio as _a
+        await _a.sleep(0)
+
+    _run(scenario())
+    check("کارت زنده واقعاً پیام فرستاد", len(cli.sent) == 1, str(cli.sent))
+    check("متنِ کارت درست است", cli.sent and cli.sent[0][1] == "سلام زنده")
+    check("به چتِ درست رفت", cli.sent and cli.sent[0][0] == 4242)
+
+    # هر دو ربات باید bind کنند، وگرنه همان باگ برمی‌گردد.
+    for f in ("owner_bot.py", "customer_bot.py"):
+        src = (Path(__file__).resolve().parents[2] / f).read_text(encoding="utf-8")
+        check(f"{f} کلاینت را bind می‌کند", "shared.bind(bot)" in src)
+
+
 def test_bots_import() -> None:
     section("هر دو ربات import می‌شوند و پنل رندر می‌شود")
     import customer_bot
@@ -749,6 +911,8 @@ def main_() -> int:
     test_persian_text_folding()
     test_owner_never_blocked()
     test_eitaa_creds_extraction()
+    test_delete_and_reset_actually_work()
+    test_live_card_is_bound()
     test_bots_import()
 
     print("\n" + "=" * 52)

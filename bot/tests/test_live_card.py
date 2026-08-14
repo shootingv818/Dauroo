@@ -68,6 +68,11 @@ def load_live_card(fake_bot):
     mod = types.ModuleType("live_card_under_test")
     mod.__dict__.update({
         "asyncio": asyncio, "time": time, "bot": fake_bot,
+        # LiveCard کلاینت را از `client()` می‌گیرد، نه از یک گلوبالِ `bot`.
+        # قبلاً مستقیم `bot.send_message` بود، ولی در این پروژه چنین گلوبالی
+        # وجود ندارد و آن ارجاع بی‌صدا `NameError` می‌داد (کارت زنده هرگز رندر
+        # نمی‌شد). حالا کلاینت bind می‌شود، پس همان را به فضای‌نام تزریق می‌کنیم.
+        "client": lambda: fake_bot,
         "MessageNotModifiedError": type("MessageNotModifiedError", (Exception,), {}),
     })
     exec(compile("from __future__ import annotations\n" + m.group(0),

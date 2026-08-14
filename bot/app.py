@@ -29,6 +29,37 @@ import time
 from bot import blocked_store, contacts_store, progress_store
 from config import config
 
+# --------------------------------------------------------------------------- #
+# کلاینتِ Telethon این پروسه
+# --------------------------------------------------------------------------- #
+#: در پروژه‌ی اصلی، `bot/app.py` خودش کلاینت را می‌ساخت و `LiveCard` مستقیم از
+#: `bot.send_message` استفاده می‌کرد. اینجا کلاینت‌ها در `owner_bot.py` و
+#: `customer_bot.py` هستند، پس آن ارجاع **تعریف‌نشده** بود و `LiveCard` هنگام
+#: اجرا `NameError` می‌داد — که داخل `except Exception: pass` بلعیده می‌شد. نتیجه:
+#: هیچ کارت زنده‌ای هرگز ساخته نمی‌شد و هیچ خطایی هم دیده نمی‌شد.
+_client = None
+#: تا هشدارِ «bind نشده» یک بار چاپ شود، نه در هر tick.
+_warned_unbound = False
+
+
+def bind(client) -> None:
+    """هر دو ربات این را در startup صدا می‌زنند (کنارِ `logbus.bind`)."""
+    global _client
+    _client = client
+
+
+def client():
+    """کلاینت، یا None. اگر bind نشده باشد **یک بار** هشدار می‌دهد.
+
+    سکوت اینجا همان چیزی بود که باگ را پنهان کرد، پس دیگر ساکت نیست.
+    """
+    global _warned_unbound
+    if _client is None and not _warned_unbound:
+        _warned_unbound = True
+        print("[app] کلاینت bind نشده — کارت زنده کار نمی‌کند "
+              "(bot.app.bind(client) را در startup صدا بزن)", flush=True)
+    return _client
+
 
 # --------------------------------------------------------------------------- #
 # کپی عینی از پروژه‌ی اصلی
@@ -90,7 +121,11 @@ def delete_account_profile(account: str) -> list:
         removed.append("مخاطبین ذخیره‌شده")
     if progress_store.clear(account):
         removed.append("لاگ ارسال")
-    if blocked_store.forget(account):
+    # `clear` است نه `forget` — این ماژول عیناً از پروژه‌ی اصلی کپی شده و اسمِ
+    # تابعش همان است. صدا زدنِ نامِ اشتباه یک `AttributeError` می‌داد که **قبل**
+    # از `db.delete_account()` رخ می‌کرد و Telethon هم استثنای هندلر را می‌بلعد،
+    # پس «حذف اکانت» و «ریست» هر دو بی‌صدا بی‌اثر بودند.
+    if blocked_store.clear(account):
         removed.append("فهرست ردشده‌ها")
 
     try:
@@ -315,7 +350,10 @@ class LiveCard:
                         continue
                     try:
                         if self._msg is None:
-                            self._msg = await bot.send_message(self.chat_id, text)
+                            cli = client()
+                            if cli is None:
+                                continue
+                            self._msg = await cli.send_message(self.chat_id, text)
                         else:
                             await self._msg.edit(text)
                         self._sent_text = text
@@ -341,7 +379,10 @@ class LiveCard:
                 return
             try:
                 if self._msg is None:
-                    self._msg = await bot.send_message(self.chat_id, text)
+                    cli = client()
+                    if cli is None:
+                        return
+                    self._msg = await cli.send_message(self.chat_id, text)
                 else:
                     await self._msg.edit(text)
                 self._sent_text = text

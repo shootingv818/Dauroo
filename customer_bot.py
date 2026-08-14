@@ -1306,6 +1306,9 @@ async def amain() -> None:
 
     await bot.start(bot_token=config.CUSTOMER_BOT_TOKEN)
     logbus.bind(bot, config.OWNER_ID)
+    # کارت زنده از همین کلاینت استفاده می‌کند؛ بدونِ این bind هیچ کارتی رندر
+    # نمی‌شود و خطایش هم بلعیده می‌شود.
+    shared.bind(bot)
     try:
         from capture.pool import pool as session_pool
         session_pool.set_max_open(store.pool_max_open)

@@ -1323,6 +1323,9 @@ async def amain() -> None:
 
     await bot.start(bot_token=config.OWNER_BOT_TOKEN)
     logbus.bind(bot, config.OWNER_ID)
+    # کارت زنده از همین کلاینت استفاده می‌کند؛ بدونِ این bind هیچ کارتی رندر
+    # نمی‌شود و خطایش هم بلعیده می‌شود.
+    shared.bind(bot)
 
     asyncio.create_task(janitor_loop())
     asyncio.create_task(blocked_summary_loop())
