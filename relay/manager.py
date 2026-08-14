@@ -148,6 +148,8 @@ class RelayManager:
         self._ping_high_streak = 0
         self._reconnect_attempt = 0
         self._started_at = 0.0
+        #: چند بررسیِ اولِ پس از اتصال، قضاوتِ تأخیر نخورند (گرمایش).
+        self._warmup_left = 0
         #: قفلِ گذارها. **تنبل** ساخته می‌شود، نه اینجا: این کلاس یک تک‌نمونه‌ی
         #: سطح-ماژول دارد (`manager`)، و یک `asyncio.Lock` در لحظه‌ی ساخت به لوپِ
         #: جاری می‌چسبد؛ ساختنش در import یعنی چسبیدن به لوپی که ربات رویش اجرا
@@ -236,6 +238,17 @@ class RelayManager:
 
         return sorted(relays, key=sort_key)
 
+    def _has_alternative(self) -> bool:
+        """آیا relayِ دیگری جز فعلی برای رفتن هست؟
+
+        اگر نه، failoverِ «کندی» بی‌معنی است: تونلی که تلگرام از آن جواب می‌دهد
+        بسته می‌شود تا دوباره به **همان** relay وصل شویم.
+        """
+        if self.current_id is None:
+            return bool(self._candidates())
+        return any(int(r["id"]) != int(self.current_id)
+                   for r in db.list_relays(include_disabled=False))
+
     # ---- اتصال به یک relayِ مشخص ----------------------------------------- #
     async def _connect(self, relay: dict) -> bool:
         rid = int(relay["id"])
@@ -307,6 +320,7 @@ class RelayManager:
         self._fail_streak = 0
         self._ping_high_streak = 0
         self._reconnect_attempt = 0
+        self._warmup_left = 1      # اولین بررسی، قضاوتِ تأخیر نمی‌خورد
         db.set_relay_fields(rid, status="active", last_ok=time.time(),
                             last_check=time.time(), fail_count=0, last_error="")
         await self._emit(kind="relay_up", relay=relay,
@@ -333,16 +347,35 @@ class RelayManager:
 
     # ---- probeِ سلامت ----------------------------------------------------- #
     async def _run_probe(self) -> tuple[bool, int]:
-        """(سالم؟, پینگ به میلی‌ثانیه). بدون probe، سالم فرض می‌شود."""
-        if self._health_probe is None:
-            return True, 0
-        t0 = time.monotonic()
+        """(سالم؟, تأخیرِ تونل به میلی‌ثانیه).
+
+        **سلامت و تأخیر دو چیزِ متفاوت‌اند و از دو جا می‌آیند:**
+
+        * سلامت از `health_probe` (یک `getMe`ِ واقعیِ تلگرام) — همان
+          «بررسیِ واقعی، نه فقط TCP».
+        * تأخیر از یک CONNECTِ SOCKS داخلِ تونل (`relay/probe.py`).
+
+        قبلاً تأخیر هم از زمانِ `getMe` گرفته می‌شد و این یک باگِ واقعی بود:
+        اولین `getMe` روی تونلِ تازه، دست‌دادنِ MTProto را هم شامل می‌شود
+        (روی سرور ۵۴۶۶ms اندازه‌گیری شد) در حالی که خودِ تونل ۳ms بود؛ نتیجه‌اش
+        failoverِ بی‌دلیل و خراب علامت‌خوردنِ یک relayِ سالم بود.
+        """
+        healthy = True
+        if self._health_probe is not None:
+            try:
+                healthy = bool(await asyncio.wait_for(
+                    self._health_probe(), timeout=self.probe_timeout))
+            except Exception:  # noqa: BLE001
+                healthy = False
+
+        ping = 0
         try:
-            ok = await asyncio.wait_for(self._health_probe(), timeout=self.probe_timeout)
+            from relay.probe import tunnel_ping_ms
+            got = await tunnel_ping_ms(self.local_port, timeout=self.probe_timeout)
+            ping = int(got) if got is not None else 0
         except Exception:  # noqa: BLE001
-            return False, 0
-        ping = int((time.monotonic() - t0) * 1000)
-        return bool(ok), ping
+            ping = 0
+        return healthy, ping
 
     # ---- failover --------------------------------------------------------- #
     async def _failover(self, reason: str) -> None:
@@ -393,6 +426,19 @@ class RelayManager:
         if self.current_id is not None:
             db.set_relay_fields(self.current_id, last_check=now, last_ping_ms=ping)
 
+        # گرمایش: اولین بررسی پس از اتصال، قضاوتِ تأخیر نمی‌خورد. تونلِ تازه
+        # هنوز دست‌دادنِ MTProto/DNS را در خودش دارد و «کند» به نظر می‌رسد؛
+        # یک relayِ سالم نباید به‌خاطر گرم‌نشدن خراب علامت بخورد.
+        if self._warmup_left > 0:
+            self._warmup_left -= 1
+            if healthy:
+                self._fail_streak = 0
+                self._ping_high_streak = 0
+                if self.current_id is not None:
+                    db.set_relay_fields(self.current_id, last_ok=now,
+                                        fail_count=0, status="active", last_error="")
+                return "warmup"
+
         if healthy and (self.max_ping_ms <= 0 or ping <= self.max_ping_ms):
             self._fail_streak = 0
             self._ping_high_streak = 0
@@ -402,11 +448,22 @@ class RelayManager:
             return "ok"
 
         if healthy and self.max_ping_ms > 0 and ping > self.max_ping_ms:
-            # نگهبانِ تأخیر: پینگ بالا رفته
+            # نگهبانِ تأخیر: پینگ بالا رفته.
             self._ping_high_streak += 1
             await self._emit(kind="relay_slow", reason=f"پینگ بالا: {ping}ms",
                              relay=db.get_relay(self.current_id) or {})
             if self._ping_high_streak >= self.ping_high_max:
+                # اگر relayِ دیگری نیست، **تونلِ سالم را خراب نکن**: تلگرام
+                # جواب می‌دهد (healthy است) و failover فقط همین تونل را می‌بندد
+                # و دوباره به همان relay وصل می‌شود — یعنی یک قطعیِ بی‌فایده.
+                # کندی را گزارش می‌کنیم و می‌گذاریم کار کند.
+                if not self._has_alternative():
+                    self._ping_high_streak = 0
+                    await self._emit(
+                        kind="relay_slow",
+                        reason="کند است ولی relayِ جانشینی نیست — تونل حفظ شد",
+                        relay=db.get_relay(self.current_id) or {})
+                    return "slow_kept"
                 await self._failover(reason=f"پینگِ مداوماً بالا ({ping}ms)")
                 return "slow_failover"
             return "slow"

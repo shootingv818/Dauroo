@@ -48,57 +48,10 @@ def _p(msg: str = "") -> None:
     print(msg, flush=True)
 
 
-async def _socks5_connect(local_port: int, dst_host: str, dst_port: int,
-                          timeout: float = 12.0):
-    """یک کلاینتِ SOCKS5 با کتابخانه‌ی استاندارد؛ (ok, پیام) را می‌دهد.
-
-    دقیقاً همان دست‌دادنی که Telethon با پروکسی می‌کند: greeting بدونِ احراز،
-    بعد CONNECT به مقصد. موفقیتِ CONNECT یعنی کلِ زنجیره (SOCKS→SSH→تلگرام) کار
-    می‌کند.
-    """
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection("127.0.0.1", local_port), timeout)
-    except Exception as exc:  # noqa: BLE001
-        return False, f"به پورتِ محلیِ SOCKS وصل نشد: {exc!r}"
-    try:
-        writer.write(b"\x05\x01\x00")            # VER=5, 1 روش, 0x00=بدون احراز
-        await writer.drain()
-        resp = await asyncio.wait_for(reader.readexactly(2), timeout)
-        if resp != b"\x05\x00":
-            return False, f"greetingِ SOCKS رد شد: {resp!r}"
-        host = dst_host.encode("idna") if not _is_ip(dst_host) else dst_host.encode()
-        req = (b"\x05\x01\x00\x03" + bytes([len(host)]) + host
-               + int(dst_port).to_bytes(2, "big"))
-        writer.write(req)
-        await writer.drain()
-        rep = await asyncio.wait_for(reader.readexactly(4), timeout)
-        if rep[1] != 0x00:
-            return False, f"CONNECT رد شد (کد {rep[1]})"
-        # آدرسِ bound را بخوان و دور بریز تا کانال تمیز بسته شود.
-        atyp = rep[3]
-        if atyp == 1:
-            await reader.readexactly(4)
-        elif atyp == 3:
-            ln = await reader.readexactly(1)
-            await reader.readexactly(ln[0])
-        elif atyp == 4:
-            await reader.readexactly(16)
-        await reader.readexactly(2)
-        return True, "ok"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{exc!r}"
-    finally:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:  # noqa: BLE001
-            pass
-
-
-def _is_ip(s: str) -> bool:
-    parts = s.split(".")
-    return len(parts) == 4 and all(p.isdigit() for p in parts)
+#: کلاینتِ SOCKS از `relay/probe.py` می‌آید — همان کدی که نگهبانِ ربات برای
+#: سنجشِ تأخیر استفاده می‌کند. یکی بودنشان مهم است: اگر این اسکریپت مسیرِ
+#: دیگری را می‌سنجید، سبزشدنش دربارهٔ ربات چیزی ثابت نمی‌کرد.
+from relay.probe import socks5_connect as _socks5_connect  # noqa: E402
 
 
 def _resolve_relay(argv) -> tuple:

@@ -418,6 +418,8 @@ def test_health_and_failover() -> None:
     first = mgr.current_id
     check("اول به h1 وصل شد", db.get_relay(first)["host"] == "h1")
 
+    # اولین بررسی پس از اتصال «گرمایش» است و قضاوتِ تأخیر نمی‌خورد.
+    check("اولین بررسی، گرمایش است", run(mgr._health_cycle()) == "warmup")
     # probe سالم → هیچ اتفاقی نمی‌افتد.
     check("probeِ سالم اقدامش ok است", run(mgr._health_cycle()) == "ok")
 
@@ -454,6 +456,13 @@ def test_health_and_failover() -> None:
                         health_probe=ok_but_slow)
     run(mgr2._select_and_connect())
     p1 = mgr2.current_id
+    # تونل جعلی است پس probeِ واقعیِ SOCKS چیزی نمی‌دهد؛ پینگ را صریح تحمیل
+    # می‌کنیم تا فقط منطقِ تصمیم سنجیده شود.
+    async def _slow_probe():
+        return True, 9999
+    mgr2._run_probe = _slow_probe
+    check("اولین بررسی گرمایش است، نه slow",
+          run(mgr2._health_cycle()) == "warmup")
     check("پینگِ بالا دورِ اول فقط slow است", run(mgr2._health_cycle()) == "slow")
     check("پینگِ بالا دورِ دوم فقط slow است", run(mgr2._health_cycle()) == "slow")
     check("پینگِ بالا در آستانه، failover می‌کند",
@@ -564,6 +573,69 @@ def test_start_stop_status() -> None:
     check("status می‌گوید asyncssh نصب نیست (این سندباکس)",
           st["have_asyncssh"] is False)
     check("بعد از stop، تونل بسته است", mgr._tunnel is None)
+
+
+def test_slow_does_not_kill_a_healthy_lone_relay() -> None:
+    """کندی نباید تنها relayِ سالم را خراب کند.
+
+    از یک شکستِ واقعی روی سرور: پنل «🔴 خراب · 5466ms» نشان می‌داد در حالی که
+    selfcheck همان relay را ۳ms و سالم می‌دید. علتش این بود که تأخیر از زمانِ
+    `getMe` گرفته می‌شد (که دست‌دادنِ MTProto را هم دارد) و با یک relay، failover
+    فقط تونلِ سالم را می‌بست و به همان relay برمی‌گشت.
+    """
+    section("کندی، تنها relayِ سالم را نمی‌کشد")
+    key = config.relay_secret_key()
+    _fresh_relays(key, [("lone", 22, 0, "pw")])
+
+    async def healthy():
+        return True
+
+    saved_max = config.RELAY_MAX_PING_MS
+    config.RELAY_MAX_PING_MS = 1        # هر پینگی «بالا» شمرده شود
+
+    async def scenario():
+        mgr = RelayManager(local_port=1080,
+                           connector=make_connector(fail_hosts=set()),
+                           health_probe=healthy)
+        await mgr.reconnect()
+        rid = mgr.current_id
+        # پینگ را زورکی بالا کن (تونلِ جعلی، پس probeِ واقعی چیزی نمی‌دهد).
+        mgr._run_probe = lambda: _fake_probe(True, 9999)
+        acts = [await mgr._health_cycle() for _ in range(5)]
+        return acts, rid, mgr
+
+    async def _fake_probe(h, p):
+        return h, p
+
+    acts, rid, mgr = run(scenario())
+    config.RELAY_MAX_PING_MS = saved_max
+
+    check("اولین بررسی گرمایش است (قضاوتِ تأخیر ندارد)",
+          acts[0] == "warmup", str(acts))
+    check("با یک relay، کندی failover نمی‌کند",
+          "slow_failover" not in acts, str(acts))
+    check("تونل حفظ می‌شود", "slow_kept" in acts, str(acts))
+    check("relay خراب علامت نمی‌خورد",
+          db.get_relay(rid)["status"] == "active", db.get_relay(rid)["status"])
+
+    # ولی اگر relayِ جانشین باشد، کندی باید سویچ کند.
+    _fresh_relays(key, [("s1", 22, 0, "pw"), ("s2", 22, 10, "pw")])
+    config.RELAY_MAX_PING_MS = 1
+
+    async def scenario2():
+        mgr = RelayManager(local_port=1080,
+                           connector=make_connector(fail_hosts=set()),
+                           health_probe=healthy)
+        await mgr.reconnect()
+        mgr._run_probe = lambda: _fake_probe(True, 9999)
+        return [await mgr._health_cycle() for _ in range(6)]
+
+    acts2 = run(scenario2())
+    config.RELAY_MAX_PING_MS = saved_max
+    check("با relayِ جانشین، کندی سویچ می‌کند",
+          "slow_failover" in acts2, str(acts2))
+    check("_has_alternative با دو relay درست است",
+          RelayManager(local_port=1)._has_alternative() is True)
 
 
 def test_proxy_shape_matches_telethon() -> None:
@@ -712,6 +784,7 @@ def main_() -> int:
     test_switch_and_delete()
     test_no_candidates_and_backoff()
     test_start_stop_status()
+    test_slow_does_not_kill_a_healthy_lone_relay()
     test_proxy_shape_matches_telethon()
     test_no_tunnel_leak_under_concurrency()
     test_owner_panel_wired()

@@ -190,13 +190,22 @@ class BrowserSession:
         await self.page.goto(url or config.EITAA_WEB_URL, wait_until="domcontentloaded")
 
     async def _launch(self) -> BrowserContext:
-        return await self._pw.chromium.launch_persistent_context(
+        kwargs = dict(
             user_data_dir=str(self.profile_dir),
             headless=not self.headed,
             args=_LAUNCH_ARGS,
             viewport={"width": 1280, "height": 850},
             locale="fa-IR",
         )
+        # CHROME_PATH: use a Chromium that is ALREADY on the system instead of
+        # the one Playwright downloads. Needed where Playwright's CDN is blocked
+        # by geography (Iran returns 403 "not available in your location"), which
+        # otherwise leaves the browser engine unusable. Unset -> unchanged
+        # behaviour, so this is opt-in and the rollback is "do not set it".
+        exe = os.environ.get("CHROME_PATH", "").strip()
+        if exe:
+            kwargs["executable_path"] = exe
+        return await self._pw.chromium.launch_persistent_context(**kwargs)
 
     async def _stop_playwright(self) -> None:
         """Stop the Playwright driver process. Missing this leaks a node process
