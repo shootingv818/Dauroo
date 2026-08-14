@@ -82,27 +82,37 @@ async def fetch_via_relay(url: str, dest: str) -> bool:
                 await conn.run(
                     "apt-get update -qq && apt-get install -y -qq curl", check=False)
 
-            _p(f"↓ دانلود روی relay: {os.path.basename(url)}")
-            cmd = (f"curl -fsSL --retry 5 --retry-delay 3 -o {remote!r} {url!r} "
-                   f"|| wget -q -O {remote!r} {url!r}")
-            res = await conn.run(cmd, check=False)
-            if res.exit_status != 0:
-                _p(f"❌ دانلود روی relay شکست خورد: "
-                   f"{(res.stderr or '')[:300]}")
-                return False
-
-            # حجم را چک کن — یک صفحه‌ی خطای HTML هم «موفق» به‌نظر می‌رسد.
-            res = await conn.run(f"stat -c%s {remote!r}", check=False)
-            try:
-                size = int((res.stdout or "0").strip())
-            except ValueError:
-                size = 0
-            if size < 100000:
-                _p(f"❌ فایلِ دانلودشده خیلی کوچک است ({size} بایت) — "
-                   f"احتمالاً صفحه‌ی خطا، نه فایلِ واقعی")
+            size = 0
+            for cand in url_candidates(url):
+                _p(f"↓ روی relay: {cand[:96]}")
+                # کدِ HTTP را صریح بگیر، تا «۴۰۳» از «قطعِ شبکه» جدا باشد.
+                cmd = (f"curl -sSL --retry 5 --retry-delay 3 "
+                       f"-w '%{{http_code}}' -o {remote!r} {cand!r}")
+                res = await conn.run(cmd, check=False)
+                code = (res.stdout or "").strip()[-3:]
+                st = await conn.run(f"stat -c%s {remote!r} 2>/dev/null || echo 0",
+                                    check=False)
+                try:
+                    size = int((st.stdout or "0").strip())
+                except ValueError:
+                    size = 0
+                # حجم را هم چک کن — یک XML/HTMLِ خطا هم «دانلودِ موفق» به‌نظر
+                # می‌رسد (روی سرور: ۴۰۳ با ۱۹۳ بایت).
+                if code == "200" and size >= 100000:
+                    _p(f"✅ روی relay دانلود شد ({size / 2**20:.1f} مگ)")
+                    break
+                _p(f"   ✗ HTTP {code or '?'} · {size} بایت")
+                if size and size < 100000:
+                    # محتوای خطا را نشان بده؛ همین می‌گوید مشکل مسیر است یا مکان.
+                    head = await conn.run(f"head -c 200 {remote!r}", check=False)
+                    snippet = (head.stdout or "").replace("\n", " ")[:180]
+                    if snippet.strip():
+                        _p(f"   پاسخ: {snippet}")
                 await conn.run(f"rm -f {remote!r}", check=False)
+                size = 0
+            if not size:
+                _p("❌ هیچ آدرسی روی relay جواب نداد")
                 return False
-            _p(f"✅ روی relay دانلود شد ({size / 2**20:.1f} مگ)")
 
             _p("↓ انتقال با SFTP…")
             async with conn.start_sftp_client() as sftp:
@@ -136,15 +146,39 @@ def _playwright_targets():
             urls.append(s.split(":", 1)[1].strip())
         elif s.startswith("Install location:"):
             dirs.append(s.split(":", 1)[1].strip())
-    # همان بازنویسیِ آدرس که در install-chromium.sh هست: آدرسی که --dry-run
-    # می‌دهد خام است، ولی آنچه واقعاً سرو می‌شود شکلِ dbazure است.
-    fixed = []
-    for u in urls:
-        if "/dbazure/download/playwright/" not in u:
-            u = u.replace("https://cdn.playwright.dev/builds/",
-                          "https://cdn.playwright.dev/dbazure/download/playwright/builds/")
-        fixed.append(u)
-    return list(zip(fixed, dirs))
+    return list(zip(urls, dirs))
+
+
+def url_candidates(url: str) -> list:
+    """چند آدرسِ ممکن برای یک بسته، به ترتیبِ شانس.
+
+    `--dry-run` آدرسِ **خام** می‌دهد (`cdn.playwright.dev/builds/...`) ولی آنچه
+    خودِ playwright می‌زند شکلِ `dbazure/download/playwright/...` است — روی سرور،
+    ffmpeg با شکلِ dbazure موفق شد و آدرسِ خامِ chrome با **HTTP 403 و ۱۹۳ بایت**
+    رد شد (یعنی یک XMLِ خطا، نه فایل). پس هر دو شکل و آینه‌ی میکروسافت را
+    امتحان می‌کنیم تا اگر یکی مسیرش عوض شده، کلِ نصب زمین نخورد.
+    """
+    out = []
+    if "/dbazure/download/playwright/" in url:
+        out.append(url)
+        out.append(url.replace("/dbazure/download/playwright/builds/", "/builds/"))
+    else:
+        out.append(url.replace("https://cdn.playwright.dev/builds/",
+                               "https://cdn.playwright.dev/dbazure/download/playwright/builds/"))
+        out.append(url)
+    # آینه‌ی میکروسافت، همان چیزی که playwright به‌عنوان fallback دارد.
+    for u in list(out):
+        m = u.replace("https://cdn.playwright.dev/",
+                      "https://playwright.download.prss.microsoft.com/")
+        if m not in out:
+            out.append(m)
+    # یکتا، با حفظِ ترتیب
+    seen, uniq = set(), []
+    for u in out:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
 
 
 async def _playwright_all() -> int:

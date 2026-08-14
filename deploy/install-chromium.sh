@@ -45,6 +45,14 @@ bad()  { echo "  ${R}❌${N} $*"; logf "FAIL $*"; }
 [ -x "$PY" ] || { echo "venv پیدا نشد: $PY — اول install.sh را بزن" >&2; exit 1; }
 mkdir -p "$(dirname "$LOG")"; : >>"$LOG"
 
+# **حتماً** داخلِ APP_DIR کار کن، نه جایی که کاربر اسکریپت را از آن زده.
+# چرا: اگر از `~/Dauroo` اجرا شود، `sudo -u dauroo` همان مسیر را به‌عنوان cwd
+# ارث می‌برد و کاربرِ سرویس اجازه‌ی خواندنِ `/root/...` را ندارد، پس
+# `python -m relay.fetch` با «No module named 'relay'» می‌مرد — یعنی بهترین
+# مسیرِ نصب بی‌صدا رد می‌شد. PYTHONPATH هم صریح ست می‌شود.
+cd "$APP_DIR" || { echo "به $APP_DIR نمی‌توانم بروم" >&2; exit 1; }
+export PYTHONPATH="$APP_DIR"
+
 echo "${B}نصبِ کرومیوم${N}"
 echo "───────────────────────────────"
 echo "  لاگ: $LOG"
@@ -245,7 +253,13 @@ step "۲b/۴ راهِ دوم-ب: دانلود روی خودِ relay، بعد آ�
 # اگر دانلودِ SOCKS برای فایلِ بزرگ نشد، این مسیر مشکل را دور می‌زند: دانلود
 # **روی relay** انجام می‌شود (آنجا فیلتری نیست) و فایل با SFTP از همان اتصالِ SSH
 # می‌آید. اعتبارنامه از جدولِ relays خوانده می‌شود، پس رمز جایی تکرار نمی‌شود.
-if sudo -u "$APP_USER" env HOME="/home/$APP_USER" \
+# تأییدِ قابلِ‌import بودن، قبل از تکیه بر آن — تا اگر مسیر خراب بود، پیامِ روشن
+# بدهد نه یک ModuleNotFoundError در عمقِ لاگ.
+if ! sudo -u "$APP_USER" env HOME="/home/$APP_USER" PYTHONPATH="$APP_DIR" \
+        "$PY" -c "import relay.fetch" >>"$LOG" 2>&1; then
+    bad "relay.fetch قابلِ import نیست (مسیر/دسترسی) — این راه رد شد"
+    tail -3 "$LOG" | sed 's/^/        /'
+elif sudo -u "$APP_USER" env HOME="/home/$APP_USER" PYTHONPATH="$APP_DIR" \
         "$PY" -m relay.fetch --playwright >>"$LOG" 2>&1; then
     chown -R "$APP_USER:$APP_USER" "/home/$APP_USER/.cache" 2>/dev/null || true
     if browser_works; then
