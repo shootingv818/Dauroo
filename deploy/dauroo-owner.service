@@ -16,6 +16,11 @@ Description=Dauroo owner bot (Eitaa SaaS) + relay tunnel
 # تا شبکه واقعاً بالا نیامده استارت نزن (وگرنه اولین اتصالِ SSH بی‌خود شکست می‌خورد)
 After=network-online.target
 Wants=network-online.target
+# اگر مدام کرش کرد، در ۵ دقیقه ۵ بار تلاش، بعد کمی صبر (جلوی loopِ کرش).
+# این دو کلید به **[Unit]** تعلق دارند نه [Service]؛ در [Service] فقط با
+# «Unknown key name … ignoring» نادیده گرفته می‌شدند و محدودیت اعمال نمی‌شد.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -30,9 +35,6 @@ ExecStart=/opt/dauroo/venv/bin/python main.py
 # اگر کرش کرد یا relay قطع شد و ربات بیرون آمد، همیشه دوباره بالا بیا.
 Restart=always
 RestartSec=5
-# اگر مدام کرش کرد، در ۵ دقیقه ۵ بار تلاش، بعد کمی صبر (جلوی loopِ کرش).
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # --- جدا نگه‌داشتنِ منابع: مسیرِ کنترل نباید زیرِ فشارِ مرورگرها خفه شود ---
 # اولویتِ CPU کمی بالاتر و کمترین احتمالِ کشته‌شدن توسط OOM، چون این پروسه

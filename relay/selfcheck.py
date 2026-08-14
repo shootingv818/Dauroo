@@ -147,6 +147,27 @@ async def _run(argv) -> int:
         return 1
     _p(f"✅ asyncssh نصب است (نسخه {getattr(asyncssh, '__version__', '?')})")
 
+    # ۱b) کلاینتِ SOCKS که خودِ Telethon لازم دارد.
+    # چرا اینجا و چرا مهم: بدونِ آن همه‌ی گام‌های زیر سبز می‌شوند و تونل واقعاً کار
+    # می‌کند، ولی **ربات** با «No module named 'socks'» می‌میرد. یک بار همین
+    # اتفاق افتاد و چون این اسکریپت سبز بود، اشتباهاً به‌نظر رسید مشکل جای دیگری
+    # است. پس این شکاف را همین‌جا می‌بندیم.
+    socks_ok = False
+    try:
+        import python_socks  # noqa: F401
+        socks_ok = True
+        _p(f"✅ python-socks نصب است (نسخه "
+           f"{getattr(python_socks, '__version__', '?')})")
+    except Exception:  # noqa: BLE001
+        try:
+            import socks  # noqa: F401
+            socks_ok = True
+            _p("✅ PySocks نصب است (مسیرِ قدیمی، کار می‌کند)")
+        except Exception:  # noqa: BLE001
+            _p("❌ python-socks نصب نیست — تونل کار می‌کند ولی **ربات** "
+               "نمی‌تواند از آن استفاده کند.")
+            _p("   رفع:  pip install 'python-socks[asyncio]'")
+
     host, port, user, password = _resolve_relay(argv)
     _p(f"• هدف: {user}@{host}:{port}")
     _p("")
@@ -218,8 +239,13 @@ async def _run(argv) -> int:
 
     _p("")
     _p("=" * 48)
-    if rc == 0:
+    if rc == 0 and socks_ok:
         _p("🟢 نتیجه: تونل کار می‌کند — ربات هم از همین مسیر به تلگرام می‌رسد.")
+    elif rc == 0 and not socks_ok:
+        # سبزِ گمراه‌کننده را صریح رد می‌کنیم.
+        _p("🟡 نتیجه: تونل کار می‌کند، ولی ربات نمی‌تواند از آن استفاده کند.")
+        _p("   python-socks نصب نیست:  pip install 'python-socks[asyncio]'")
+        rc = 1
     else:
         _p("🔴 نتیجه: SSH وصل شد ولی به تلگرام نرسید.")
         _p("   یعنی خودِ سرورِ relay به تلگرام دسترسی ندارد (نه سرورِ ایران).")

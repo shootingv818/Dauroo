@@ -133,7 +133,7 @@ if [ $CHECK_ONLY = 1 ]; then
         else bad "$u نصب نیست"; fi
     done
     if [ -x "$APP_DIR/venv/bin/python" ]; then
-        for m in telethon asyncssh playwright; do
+        for m in telethon asyncssh playwright python_socks; do
             "$APP_DIR/venv/bin/python" -c "import $m" 2>/dev/null && ok "$m import می‌شود" || bad "$m نیست"
         done
     fi
@@ -213,6 +213,13 @@ for m in telethon asyncssh; do
         bad "$m import نمی‌شود — بدونش $( [ $m = asyncssh ] && echo 'تونلِ relay' || echo 'ربات') کار نمی‌کند"
     fi
 done
+# python_socks جدا چک می‌شود چون نبودنش **بی‌صدا** خراب می‌کند: تونل سالم بالا
+# می‌آید و selfcheck سبز است، ولی ربات با «No module named 'socks'» می‌میرد.
+if "$PY" -c "import python_socks" 2>>"$LOG"; then
+    ok "python-socks: $("$PY" -c "import python_socks;print(getattr(python_socks,'__version__','?'))" 2>/dev/null)  (پروکسیِ تلگرام)"
+else
+    bad "python-socks نیست — با relay روشن، ربات بالا نمی‌آید. رفع: $PY -m pip install 'python-socks[asyncio]'"
+fi
 
 # --------------------------------------------------------------------------- #
 step "۵/۹ کرومیومِ Playwright"

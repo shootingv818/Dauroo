@@ -566,6 +566,66 @@ def test_start_stop_status() -> None:
     check("بعد از stop، تونل بسته است", mgr._tunnel is None)
 
 
+def test_proxy_shape_matches_telethon() -> None:
+    """قالبِ پروکسی باید با امضای واقعیِ Telethon بخواند.
+
+    این تست از یک شکستِ واقعی روی سرور آمده: تونل کامل کار می‌کرد و selfcheck
+    سبز بود، ولی ربات با `ModuleNotFoundError: No module named 'socks'` می‌مرد،
+    چون `python-socks` در requirements نبود.
+
+    امضای واقعی در Telephon (network/connection/connection.py):
+        _parse_proxy(proxy_type, addr, port, rdns=True, username=None, password=None)
+    و برای tuple/list صدا زده می‌شود با `_parse_proxy(*proxy)`.
+    """
+    section("قالبِ پروکسی با امضای Telethon می‌خواند")
+    px = relay.telethon_proxy()
+    check("پروکسی tuple است (Telethon با *proxy بازش می‌کند)",
+          isinstance(px, tuple), str(type(px)))
+    check("سه عضو دارد: (proxy_type, addr, port)", len(px) == 3, str(px))
+    ptype, addr, port = px
+    # Telethon رشته را lower می‌کند و با "socks5" مقایسه می‌کند.
+    check("نوع، رشته‌ی 'socks5' است که Telethon می‌فهمد",
+          isinstance(ptype, str) and ptype.lower() == "socks5", str(ptype))
+    check("آدرس لوکال است (پروکسی سیستمی نیست)", addr == "127.0.0.1", str(addr))
+    check("پورت عددِ درست است", isinstance(port, int) and 0 < port < 65536, str(port))
+
+    # همان منطقِ انتخابِ مسیرِ Telethon را بازسازی می‌کنیم: اگر python_socks
+    # نباشد، Telethon به PySocks می‌افتد و `from socks import ...` می‌کند.
+    # پس «کلاینتِ SOCKS موجود است» یک پیش‌نیازِ واقعیِ راه‌اندازی است.
+    have = relay.socks_available()
+    check("relay.socks_available() بدونِ استثنا جواب می‌دهد", isinstance(have, bool))
+    if not have:
+        print("        ℹ️  python-socks در این سندباکس نصب نیست؛ روی سرور از "
+              "requirements.txt نصب می‌شود (تست پروکسی را رد نمی‌کند).")
+
+    # قالب باید با امضا سازگار باشد: یک تابعِ بدلی با همان امضا باید بتواند
+    # tuple را بی‌خطا بگیرد. این همان چیزی است که Telethon انجام می‌دهد.
+    def _parse_proxy(proxy_type, addr, port, rdns=True, username=None, password=None):
+        return (str(proxy_type).lower(), addr, int(port))
+
+    try:
+        parsed = _parse_proxy(*px)
+        check("با امضای Telethon باز می‌شود", parsed[0] == "socks5")
+    except TypeError as exc:
+        check("با امضای Telethon باز می‌شود", False, str(exc))
+
+    # وقتی relay خاموش است باید None بدهد (رول‌بکِ کامل به اتصالِ مستقیم).
+    saved = config.RELAY_ENABLED
+    config.RELAY_ENABLED = False
+    check("با relayِ خاموش، پروکسی None است (اتصالِ مستقیم)",
+          relay.telethon_proxy() is None)
+    config.RELAY_ENABLED = saved
+
+    # پورتِ مشتری باید با مالک فرق کند، وگرنه دو پروسه یک پورت را می‌گیرند.
+    saved_mode = config.MODE
+    config.MODE = "owner"
+    p_owner = config.relay_local_port()
+    config.MODE = "customer"
+    p_cust = config.relay_local_port()
+    config.MODE = saved_mode
+    check("پورتِ مشتری با مالک فرق دارد", p_owner != p_cust, f"{p_owner} vs {p_cust}")
+
+
 def test_no_tunnel_leak_under_concurrency() -> None:
     section("گذارهای هم‌زمان تونلِ رهاشده به‌جا نمی‌گذارند")
     key = config.relay_secret_key()
@@ -652,6 +712,7 @@ def main_() -> int:
     test_switch_and_delete()
     test_no_candidates_and_backoff()
     test_start_stop_status()
+    test_proxy_shape_matches_telethon()
     test_no_tunnel_leak_under_concurrency()
     test_owner_panel_wired()
 

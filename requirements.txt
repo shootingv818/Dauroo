@@ -16,5 +16,16 @@ telethon>=1.36.0
 # spawn کردنِ ssh/autossh و بدون systemd. اگر relay را روشن می‌کنی، این لازم است.
 asyncssh>=2.14.0
 
+# کلاینتِ SOCKS برای Telethon. **بدونِ این، پروکسی کار نمی‌کند** — و این را روی
+# سرورِ واقعی به‌سختی فهمیدیم: تونل کامل بالا می‌آمد و selfcheck سبز بود، ولی خودِ
+# ربات با `ModuleNotFoundError: No module named 'socks'` می‌مرد.
+# دلیلش در سورسِ Telethon است (network/connection/connection.py:73):
+#   `_parse_proxy` اگر `python_socks` موجود باشد رشته‌ی "socks5" را می‌فهمد،
+#   وگرنه به مسیرِ PySocks می‌افتد و `from socks import ...` را امتحان می‌کند.
+# Telethon از پایتون ۳.۶ به بعد رسماً python-socks را جای PySocks گذاشته، پس
+# همین درست است (نه PySocks). extraی [asyncio] همان چیزی است که Telethon
+# می‌خواهد، چون اتصال باید async باشد.
+python-socks[asyncio]>=2.4.3
+
 # ---- اختیاری ----
 # cryptg  # رمزنگاری سریع‌تر Telethon (بومی، کامپایل لازم دارد)

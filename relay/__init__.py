@@ -32,13 +32,39 @@ from relay import crypto
 from relay.manager import RelayManager, asyncssh_available, manager
 
 __all__ = ["manager", "RelayManager", "telethon_proxy", "ensure_bootstrap",
-           "make_event_sink", "asyncssh_available", "crypto"]
+           "make_event_sink", "asyncssh_available", "socks_available", "crypto"]
+
+
+def socks_available() -> bool:
+    """آیا کلاینتِ SOCKS که Telethon لازم دارد نصب است؟
+
+    **این چک حیاتی است.** بدونِ `python_socks`، تونل می‌تواند کاملاً سالم باشد
+    (selfcheck سبز، تلگرام از داخلِ تونل در دسترس) و ربات باز هم با
+    `ModuleNotFoundError: No module named 'socks'` بمیرد — چون
+    `Telethon/network/connection/connection.py::_parse_proxy` وقتی `python_socks`
+    نباشد به مسیرِ قدیمیِ PySocks می‌افتد و `from socks import ...` را امتحان
+    می‌کند. یک بار روی سرورِ واقعی همین اتفاق افتاد و چون selfcheck سبز بود،
+    گمراه‌کننده شد. پس حالا صریح چک می‌شود.
+    """
+    try:
+        import python_socks  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        try:
+            import socks  # noqa: F401  (PySocks، مسیرِ قدیمی)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
 
 def telethon_proxy():
     """پروکسیِ Telethon برای این پروسه، یا None اگر relay خاموش است.
 
-    قالبِ `('socks5', host, port)` را Telethon (از طریقِ python-socks) می‌فهمد.
+    قالبِ `('socks5', host, port)` مستقیماً با امضای
+    `_parse_proxy(proxy_type, addr, port, ...)` در Telethon می‌خواند، و رشته‌ی
+    `"socks5"` را همان‌جا می‌فهمد — **به شرطی که `python_socks` نصب باشد**
+    (`socks_available()` را ببین؛ در `requirements.txt` هست).
+
     شنونده روی `127.0.0.1` است، پس فقط همین پروسه از آن استفاده می‌کند — نه یک
     پروکسیِ سیستمی. اگر relay خاموش باشد None برمی‌گردد و ربات مستقیم وصل می‌شود
     (همان رفتارِ قبلی، برای محیطِ توسعه یا سروری که فیلتر نیست).
