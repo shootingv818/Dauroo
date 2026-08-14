@@ -75,6 +75,26 @@ except Exception as exc:
 PYEOF
 }
 
+#: آخرین دلیلِ شکستِ لانچ را از لاگ بیرون بکش و نشان بده.
+#: بدونِ این، پیامِ «بالا نیامد» هیچ سرنخی نمی‌دهد و باید دستی لاگ را بخوانی.
+why_failed() {
+    local line
+    line="$(grep -a 'browser launch FAILED' "$LOG" | tail -1 | cut -c1-300 || true)"
+    if [ -n "$line" ]; then
+        echo "     ${C}دلیل: ${line#*FAILED: }${N}"
+    fi
+    # اگر باینری یک stubِ snap باشد (روی اوبونتو chromium-browser همین است)،
+    # معمولاً برای کاربرِ سرویس بالا نمی‌آید — این را صریح بگو.
+    if [ -n "${CHROME_PATH:-}" ] && [ -e "${CHROME_PATH}" ]; then
+        if file -b "${CHROME_PATH}" 2>/dev/null | grep -qi 'text\|script' \
+           || grep -qai 'snap' "${CHROME_PATH}" 2>/dev/null; then
+            echo "     ${Y}توجه: ${CHROME_PATH} یک اسکریپت/stubِ snap است، نه باینریِ واقعی.${N}"
+            echo "     ${Y}روی اوبونتو، chromium-browser به snap اشاره می‌کند و برای${N}"
+            echo "     ${Y}کاربرِ سرویس معمولاً بالا نمی‌آید. راهِ ۲ (تونل) بهتر است.${N}"
+        fi
+    fi
+}
+
 step "۰/۴ آزمونِ وضعیتِ فعلی"
 # CHROME_PATH موجود در .env را هم در آزمون لحاظ کن.
 EXISTING_CHROME="$(grep -E '^CHROME_PATH=.+' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
@@ -86,6 +106,7 @@ if CHROME_PATH="$EXISTING_CHROME" browser_works; then
     exit 0
 fi
 warn "مرورگر بالا نمی‌آید؛ می‌رویم سرِ نصب"
+CHROME_PATH="$EXISTING_CHROME" why_failed
 
 # --------------------------------------------------------------------------- #
 step "۱/۴ راهِ اول: دانلودِ مستقیم"
@@ -118,6 +139,8 @@ else
     # خطوطِ «Download url:» و «Install location:» را جفت‌به‌جفت بردار.
     mapfile -t URLS < <(printf '%s\n' "$DRY" | grep -oP 'Download url:\s*\K\S+' || true)
     mapfile -t DIRS < <(printf '%s\n' "$DRY" | grep -oP 'Install location:\s*\K\S+' || true)
+    # آدرس‌های جایگزینی که خودِ playwright فهرست می‌کند (میکروسافت/آژور).
+    mapfile -t FALLBACKS < <(printf '%s\n' "$DRY" | grep -oP 'Download fallback \d+:\s*\K\S+' || true)
 
     if [ "${#URLS[@]}" -eq 0 ]; then
         warn "نتوانستم URL دانلود را از playwright بگیرم (لاگ را ببین)"
@@ -131,9 +154,42 @@ else
             name="$(basename "$url")"
             echo "  ${C}↓ $name${N}"
             tmp="/tmp/pw_$name"
-            # --socks5-hostname: حلِ نام هم سمتِ relay انجام شود، نه اینجا.
-            if curl -fsSL --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
-                    --connect-timeout 20 --max-time 900 -o "$tmp" "$url" >>"$LOG" 2>&1; then
+
+            # چند آدرس را به ترتیب امتحان کن.
+            #
+            # چرا لازم شد: `--dry-run` آدرسِ **خام** می‌دهد
+            #   https://cdn.playwright.dev/builds/cft/<ver>/linux64/chrome-linux64.zip
+            # ولی آنچه خودِ playwright هنگام دانلود می‌زند این است:
+            #   https://cdn.playwright.dev/dbazure/download/playwright/builds/cft/...
+            # روی سرور، ffmpeg (که آدرسِ dry-runش از قبل شکلِ dbazure داشت) موفق
+            # شد و chrome شکست خورد — همین تفاوت. پس شکلِ dbazure را هم می‌سازیم،
+            # و آدرس‌های جایگزینِ خودِ playwright را هم اضافه می‌کنیم.
+            CANDS=()
+            case "$url" in
+                *"/dbazure/download/playwright/"*) CANDS+=("$url") ;;
+                https://cdn.playwright.dev/builds/*)
+                    CANDS+=("${url/https:\/\/cdn.playwright.dev\/builds\//https://cdn.playwright.dev/dbazure/download/playwright/builds/}")
+                    CANDS+=("$url") ;;
+                *) CANDS+=("$url") ;;
+            esac
+            for fb in "${FALLBACKS[@]:-}"; do
+                [ -n "$fb" ] && [ "$(basename "$fb")" = "$name" ] && CANDS+=("$fb")
+            done
+
+            got=0
+            for cand in "${CANDS[@]}"; do
+                logf "  try $cand"
+                # --socks5-hostname: حلِ نام هم سمتِ relay انجام شود، نه اینجا.
+                if curl -fsSL --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
+                        --connect-timeout 20 --max-time 900 \
+                        -o "$tmp" "$cand" >>"$LOG" 2>&1; then
+                    got=1
+                    break
+                fi
+                warn "نشد: ${cand:0:78}…"
+            done
+
+            if [ "$got" -eq 1 ]; then
                 mkdir -p "$dir"
                 if unzip -qo "$tmp" -d "$dir" >>"$LOG" 2>&1; then
                     ok "$name نصب شد در $dir"
@@ -142,7 +198,7 @@ else
                 fi
                 rm -f "$tmp"
             else
-                bad "دانلودِ $name از تونل شکست خورد"; FAILED=1
+                bad "هیچ‌کدام از ${#CANDS[@]} آدرسِ $name جواب نداد"; FAILED=1
             fi
         done
         # پلی‌رایت اجرایی‌بودن را چک می‌کند، پس بیتِ اجرا را ست کن.
@@ -155,6 +211,7 @@ else
             exit 0
         fi
         warn "نصب از تونل کامل نشد"
+        why_failed
     fi
 fi
 
@@ -196,7 +253,8 @@ else
         echo "  sudo systemctl restart dauroo-owner dauroo-customer"
         exit 0
     fi
-    bad "کرومیومِ سیستم هم بالا نیامد (لاگ: $LOG)"
+    bad "کرومیومِ سیستم هم بالا نیامد"
+    CHROME_PATH="$CAND" why_failed
 fi
 
 # --------------------------------------------------------------------------- #
