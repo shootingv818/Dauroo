@@ -566,6 +566,61 @@ def test_start_stop_status() -> None:
     check("بعد از stop، تونل بسته است", mgr._tunnel is None)
 
 
+def test_no_tunnel_leak_under_concurrency() -> None:
+    section("گذارهای هم‌زمان تونلِ رهاشده به‌جا نمی‌گذارند")
+    key = config.relay_secret_key()
+    _fresh_relays(key, [("cA", 22, 0, "pw"), ("cB", 22, 10, "pw")])
+
+    created = []
+
+    class SlowTunnel(FakeTunnel):
+        def __init__(self, host):
+            super().__init__(host_key_b64="K")
+            self.host = host
+            created.append(self)
+
+        async def forward_socks(self, h, p):
+            await asyncio.sleep(0.01)   # پنجره‌ی رقابت
+            self.forwarded = (h, p)
+
+    async def slow_conn(*, host, port, username, password, keepalive):
+        await asyncio.sleep(0.02)       # اتصال زمان می‌برد
+        return SlowTunnel(host)
+
+    async def scenario():
+        mgr = RelayManager(local_port=1080, connector=slow_conn)
+        await mgr.reconnect()
+        # نگهبان و مالک هم‌زمان گذار می‌زنند — همان چیزی که تونل را لو می‌داد.
+        await asyncio.gather(mgr.reconnect(), mgr.switch(None))
+        leaked = [t for t in created if not t.is_closed() and t is not mgr._tunnel]
+        active = mgr._tunnel
+        await mgr.stop()
+        return leaked, active, created
+
+    leaked, active, all_t = run(scenario())
+    check("تونلی ساخته شد", len(all_t) >= 2, str(len(all_t)))
+    check("هیچ تونلِ رهاشده‌ای نماند", leaked == [],
+          f"{len(leaked)} رهاشده: {[t.host for t in leaked]}")
+    check("یک تونلِ فعال هست", active is not None)
+    check("بعد از stop همه بسته‌اند", all(t.is_closed() for t in all_t))
+
+    # ترجیح نباید برای relayِ ناموجود ذخیره شود، وگرنه یک آیدیِ مرده برای همیشه
+    # در تنظیمات می‌ماند.
+    db.set_owner_setting("relay_preferred", None)
+
+    async def bad_switch():
+        mgr = RelayManager(local_port=1080, connector=make_connector(fail_hosts=set()))
+        ok = await mgr.switch(999999)
+        await mgr.stop()
+        return ok
+
+    ok = run(bad_switch())
+    check("سویچ به relayِ ناموجود کرش نمی‌کند", isinstance(ok, bool))
+    check("ترجیحِ مرده ذخیره نمی‌شود",
+          db.owner_setting("relay_preferred") is None,
+          str(db.owner_setting("relay_preferred")))
+
+
 def test_owner_panel_wired() -> None:
     section("پنلِ مالک: هندلرهای relay ثبت و کارت رندر می‌شود")
     import owner_bot
@@ -597,6 +652,7 @@ def main_() -> int:
     test_switch_and_delete()
     test_no_candidates_and_backoff()
     test_start_stop_status()
+    test_no_tunnel_leak_under_concurrency()
     test_owner_panel_wired()
 
     print("\n" + "=" * 52)

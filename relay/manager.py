@@ -148,6 +148,11 @@ class RelayManager:
         self._ping_high_streak = 0
         self._reconnect_attempt = 0
         self._started_at = 0.0
+        #: قفلِ گذارها. **تنبل** ساخته می‌شود، نه اینجا: این کلاس یک تک‌نمونه‌ی
+        #: سطح-ماژول دارد (`manager`)، و یک `asyncio.Lock` در لحظه‌ی ساخت به لوپِ
+        #: جاری می‌چسبد؛ ساختنش در import یعنی چسبیدن به لوپی که ربات رویش اجرا
+        #: نمی‌شود (و روی پایتون ۳.۹ همان‌جا کرش).
+        self._lock_obj = None
 
     # ---- تنظیمات (از config، تا تست بتواند override کند) ------------------- #
     @property
@@ -169,6 +174,23 @@ class RelayManager:
     @property
     def ping_high_max(self) -> int:
         return max(1, int(config.RELAY_PING_HIGH_STREAK))
+
+    def _lock(self) -> asyncio.Lock:
+        """قفلِ گذارِ تونل، در لوپِ در حال اجرا ساخته می‌شود.
+
+        **همه‌ی** گذارها (اتصال، قطع، failover، سویچ) باید از این رد شوند، وگرنه
+        دو گذارِ هم‌زمان — مثلاً failoverِ نگهبان و سویچِ دستیِ مالک از پنل — هر
+        دو تونل می‌سازند و یکی **رهاشده** می‌ماند: یک سشنِ SSH بازِ بی‌استفاده روی
+        relay و یک پورتِ SOCKS اشغال‌شده که هیچ‌کس نمی‌بنددش.
+
+        قاعده‌ی جلوگیری از deadlock: قفل فقط در مرزهای **بیرونی** گرفته می‌شود
+        (`start`/`stop`/`switch`/`reconnect` و یک دورِ نگهبان). متدهای درونی
+        (`_connect`، `_failover`، `_teardown_tunnel`، `_select_and_connect`،
+        `_health_cycle`، `_reconnect_cycle`) هرگز آن را نمی‌گیرند.
+        """
+        if self._lock_obj is None:
+            self._lock_obj = asyncio.Lock()
+        return self._lock_obj
 
     # ---- رویداد/لاگ ------------------------------------------------------- #
     async def _emit(self, **kw) -> None:
@@ -273,6 +295,13 @@ class RelayManager:
                              reason="بازکردنِ پورت SOCKS شکست خورد", detail=_short(exc))
             return False
 
+        # دفاعی: اگر مسیری تونلِ قبلی را نبسته بود، اینجا ببند تا جایگزینی‌اش
+        # تونلِ بازِ رهاشده به‌جا نگذارد.
+        if self._tunnel is not None and self._tunnel is not tunnel:
+            try:
+                await self._tunnel.close()
+            except Exception:  # noqa: BLE001
+                pass
         self._tunnel = tunnel
         self.current_id = rid
         self._fail_streak = 0
@@ -393,21 +422,32 @@ class RelayManager:
 
     # ---- حلقه‌ی نگهبان ----------------------------------------------------- #
     async def _guardian(self) -> None:
+        """تا وقتی stop نشده، تونل را زنده نگه می‌دارد.
+
+        هر گذار زیرِ قفل انجام می‌شود، ولی **خواب هرگز زیرِ قفل نیست** — وگرنه یک
+        سویچِ دستی از پنل تا `interval` ثانیه معطل می‌ماند.
+        """
         while not self._stopping:
             # تونل مُرده؟ فوراً وصل مجدد با backoff.
             if self._tunnel is None or self._tunnel.is_closed():
-                await self._reconnect_cycle()
-                if self._tunnel is None:
+                async with self._lock():
+                    # دوباره چک کن: ممکن است سویچِ دستی همین حالا درستش کرده باشد.
+                    if not self._stopping and (self._tunnel is None
+                                               or self._tunnel.is_closed()):
+                        await self._reconnect_cycle()
+                    need_backoff = self._tunnel is None
+                if need_backoff and not self._stopping:
                     await asyncio.sleep(self._backoff(self._reconnect_attempt or 1))
                 continue
 
             await asyncio.sleep(self.interval)
             if self._stopping:
                 break
-            if self._tunnel is None or self._tunnel.is_closed():
-                continue
 
-            await self._health_cycle()
+            async with self._lock():
+                if self._stopping or self._tunnel is None or self._tunnel.is_closed():
+                    continue
+                await self._health_cycle()
 
     # ---- API عمومی -------------------------------------------------------- #
     def configure(self, *, health_probe=None, on_event=None, connector=None) -> None:
@@ -432,7 +472,8 @@ class RelayManager:
                 kind="relay_error",
                 reason="کتابخانه‌ی asyncssh نصب نیست — تونل برقرار نمی‌شود",
                 detail="pip install asyncssh")
-        ok = await self._select_and_connect()
+        async with self._lock():
+            ok = await self._select_and_connect()
         self._task = asyncio.create_task(self._guardian())
         return ok
 
@@ -445,23 +486,30 @@ class RelayManager:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._task = None
-        await self._teardown_tunnel()
+        # قفل بعد از cancel گرفته می‌شود: اگر نگهبان وسطِ یک گذار بود، cancel
+        # قفلش را آزاد می‌کند و ما تونل را تمیز می‌بندیم.
+        async with self._lock():
+            await self._teardown_tunnel()
 
     async def switch(self, relay_id: int | None = None) -> bool:
         """سویچِ دستی. relayِ داده‌شده را ترجیحی می‌کند و فوراً به آن می‌رود."""
+        target = None
         if relay_id is not None:
-            db.set_owner_setting("relay_preferred", int(relay_id))
-            # به relayِ انتخاب‌شده یک شانسِ تازه بده (اگر قبلاً خراب علامت خورده).
-            r = db.get_relay(int(relay_id))
-            if r and r.get("status") == "broken":
-                db.set_relay_fields(int(relay_id), status="idle", fail_count=0)
-        old = self.current_id
-        await self._teardown_tunnel()
-        if relay_id is not None:
-            r = db.get_relay(int(relay_id))
-            if r and await self._connect(r):
+            target = db.get_relay(int(relay_id))
+            # ترجیح را فقط برای relayی که **واقعاً هست** ذخیره کن، وگرنه یک آیدیِ
+            # مرده برای همیشه در تنظیمات می‌ماند.
+            if target:
+                db.set_owner_setting("relay_preferred", int(relay_id))
+                # شانسِ تازه، اگر قبلاً خراب علامت خورده بود.
+                if target.get("status") == "broken":
+                    db.set_relay_fields(int(relay_id), status="idle", fail_count=0)
+                    target = db.get_relay(int(relay_id))
+        async with self._lock():
+            old = self.current_id
+            await self._teardown_tunnel()
+            if target and await self._connect(target):
                 return True
-        return await self._select_and_connect(exclude=old)
+            return await self._select_and_connect(exclude=old)
 
     async def reconnect(self) -> bool:
         """تونل را می‌بندد و دوباره بهترین relay را انتخاب و وصل می‌کند.
@@ -469,8 +517,9 @@ class RelayManager:
         هیچ relayی را کنار نمی‌گذارد: هدف «همین حالا دوباره وصل شو» است، حتی اگر
         بهترین انتخاب همان قبلی باشد.
         """
-        await self._teardown_tunnel()
-        return await self._select_and_connect()
+        async with self._lock():
+            await self._teardown_tunnel()
+            return await self._select_and_connect()
 
     def status(self) -> dict:
         current = db.get_relay(self.current_id) if self.current_id else None

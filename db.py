@@ -157,8 +157,6 @@ def init() -> None:
             state       TEXT DEFAULT 'queued',
             engine      TEXT DEFAULT '',
             trace_id    TEXT DEFAULT '',
-            cust_msg_id INTEGER DEFAULT 0,
-            log_msg_id  INTEGER DEFAULT 0,
             sent        INTEGER DEFAULT 0,
             failed      INTEGER DEFAULT 0,
             skipped     INTEGER DEFAULT 0,
@@ -714,16 +712,6 @@ def next_add_slot(customer_id: int) -> float:
     return max(0.0, (oldest + config.ADD_QUOTA_WINDOW) - time.time())
 
 
-def blocked_attempt_counts() -> dict:
-    """Placeholder for the daily blocked-attempt summary.
-
-    Attempts by blocked users are counted IN MEMORY (see gate.py) and never
-    written here, because writing one row per attempt is exactly the server load
-    a block is supposed to remove.
-    """
-    return {}
-
-
 def prune_events() -> int:
     conn = _conn()
     cur = conn.execute("DELETE FROM events WHERE at < ?",
@@ -758,23 +746,6 @@ def finish_job(job_id: str, state: str, sent: int = 0, failed: int = 0,
         "finished_at=? WHERE job_id=?",
         (str(state), int(sent), int(failed), int(skipped), str(last_error)[:400],
          time.time(), str(job_id)))
-    conn.commit()
-    conn.close()
-
-
-def set_job_msg(job_id: str, cust_msg_id: int = 0, log_msg_id: int = 0) -> None:
-    sets, vals = [], []
-    if cust_msg_id:
-        sets.append("cust_msg_id=?")
-        vals.append(int(cust_msg_id))
-    if log_msg_id:
-        sets.append("log_msg_id=?")
-        vals.append(int(log_msg_id))
-    if not sets:
-        return
-    vals.append(str(job_id))
-    conn = _conn()
-    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?", vals)
     conn.commit()
     conn.close()
 
@@ -958,8 +929,4 @@ def set_relay_fields(relay_id: int, **fields) -> None:
     conn.close()
 
 
-def count_relays() -> int:
-    conn = _conn()
-    n = conn.execute("SELECT COUNT(*) AS n FROM relays").fetchone()["n"]
-    conn.close()
-    return int(n)
+

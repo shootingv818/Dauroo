@@ -247,14 +247,6 @@ def code_hint(code: object) -> str | None:
     return None
 
 
-def _live(title: str, phone: str, pairs: Iterable[tuple[str, object]],
-          ts: str | None = None) -> str:
-    """پوسته‌ی کارت زنده: عنوان، خط، 📱 شماره، سطرها، 🕒 زمان.
-    این همان کارتی است که **در جا ویرایش می‌شود** تا جاب تمام شود."""
-    lines = [title, DIVIDER, f"📱 {phone}", *_rows(pairs), f"🕒 {ts or now_hms()}"]
-    return "\n".join(lines)
-
-
 # ---- کارت‌های زنده (در جا ویرایش می‌شوند) ---------------------------------
 
 def live_contacts(phone: str, prefix: str, found: int, probed: int, total: int,
