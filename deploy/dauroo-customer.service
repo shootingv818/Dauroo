@@ -24,8 +24,10 @@ User=dauroo
 Group=dauroo
 WorkingDirectory=/opt/dauroo
 EnvironmentFile=/opt/dauroo/.env
-Environment=MODE=customer
-ExecStart=/opt/dauroo/venv/bin/python main.py
+# نقش به‌صورت آرگومان (توضیحِ کامل در dauroo-owner.service): مقادیرِ
+# EnvironmentFile بر Environment= می‌چربند، پس MODE داخلِ .env این سرویس را هم
+# به ربات مالک تبدیل می‌کرد.
+ExecStart=/opt/dauroo/venv/bin/python main.py customer
 
 Restart=always
 # ۱۰ ثانیه، نه ۵: هر استارت یک اتصالِ SSH تازه به relay است، پس

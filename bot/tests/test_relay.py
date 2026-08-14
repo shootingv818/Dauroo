@@ -639,6 +639,66 @@ def test_slow_does_not_kill_a_healthy_lone_relay() -> None:
           RelayManager(local_port=1)._has_alternative() is True)
 
 
+def test_mode_from_argv_wins() -> None:
+    """نقش از argv می‌آید و محیط نمی‌تواند بازنویسی‌اش کند.
+
+    از یک شکستِ واقعی: هر دو سرویسِ systemd ربات **مالک** را اجرا کردند، چون
+    `MODE=owner` داخلِ `.env` بر `Environment=MODE=customer` چربید. نتیجه‌اش
+    گرفتنِ پورتِ SOCKS اشتباه و بعد دو پروسه روی یک فایلِ سشن بود
+    (`database is locked`).
+    """
+    section("نقش از argv می‌آید، نه از .env")
+    import importlib
+    main_mod = importlib.import_module("main")
+
+    saved_env = os.environ.get("MODE")
+    try:
+        # محیط می‌گوید owner، ولی argv می‌گوید customer → argv باید ببرد.
+        os.environ["MODE"] = "owner"
+        got = main_mod._pick_mode(["main.py", "customer"])
+        check("argv بر MODEِ محیط می‌چربد", got == "customer", got)
+        check("محیط هم هم‌راستا می‌شود", os.environ["MODE"] == "customer",
+              os.environ.get("MODE"))
+
+        os.environ["MODE"] = "customer"
+        check("argv=owner هم می‌برد",
+              main_mod._pick_mode(["main.py", "owner"]) == "owner")
+
+        # بدونِ argv، محیط پشتیبان است (اجرای دستی).
+        os.environ["MODE"] = "customer"
+        check("بدونِ argv، MODEِ محیط استفاده می‌شود",
+              main_mod._pick_mode(["main.py"]) == "customer")
+
+        # فلگ‌ها نباید با نقش اشتباه شوند.
+        os.environ["MODE"] = "owner"
+        check("فلگ به‌عنوان نقش خوانده نمی‌شود",
+              main_mod._pick_mode(["main.py", "--verbose"]) == "owner")
+
+        # نقشِ نامعتبر باید صریح رد شود، نه اینکه بی‌صدا owner شود.
+        try:
+            main_mod._pick_mode(["main.py", "wat"])
+            check("نقشِ نامعتبر رد می‌شود", False)
+        except SystemExit:
+            check("نقشِ نامعتبر رد می‌شود", True)
+
+        # و پورتِ SOCKS باید نقش را دنبال کند — همان چیزی که خراب شده بود.
+        saved_mode = config.MODE
+        main_mod._pick_mode(["main.py", "owner"])
+        config.MODE = "owner"
+        p_owner = config.relay_local_port()
+        main_mod._pick_mode(["main.py", "customer"])
+        config.MODE = "customer"
+        p_cust = config.relay_local_port()
+        config.MODE = saved_mode
+        check("پورتِ SOCKS نقش را دنبال می‌کند", p_owner != p_cust,
+              f"{p_owner} vs {p_cust}")
+    finally:
+        if saved_env is None:
+            os.environ.pop("MODE", None)
+        else:
+            os.environ["MODE"] = saved_env
+
+
 def test_wait_until_up() -> None:
     """صبر برای تونل، به‌جای مردن و افتادن در حلقه‌ی ری‌استارت."""
     section("wait_until_up: صبر می‌کند تا تونل بیاید")
@@ -844,6 +904,7 @@ def main_() -> int:
     test_no_candidates_and_backoff()
     test_start_stop_status()
     test_slow_does_not_kill_a_healthy_lone_relay()
+    test_mode_from_argv_wins()
     test_wait_until_up()
     test_proxy_shape_matches_telethon()
     test_no_tunnel_leak_under_concurrency()

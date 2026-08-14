@@ -261,6 +261,16 @@ else
     ok ".env از قبل هست (دست‌نخورده ماند)"
     NEED_ENV=0
 fi
+# مهاجرت: یک خطِ فعالِ `MODE=` در .env قدیمی باید غیرفعال شود.
+# چون مقادیرِ EnvironmentFile بر Environment= می‌چربند، همان یک خط باعث می‌شد
+# **هر دو** سرویس یک نقش را اجرا کنند (سرویسِ مشتری، ربات مالک) و بعد دو پروسه
+# یک فایلِ سشن را باز کنند → «database is locked» و حلقه‌ی ری‌استارت.
+# نقش الان با آرگومان به main.py داده می‌شود، پس این خط فقط مضر است.
+if grep -qE '^[[:space:]]*MODE=' "$APP_DIR/.env"; then
+    sed -i 's/^[[:space:]]*MODE=/# MODE=  (غیرفعال شد؛ نقش با آرگومان داده می‌شود) /' \
+        "$APP_DIR/.env"
+    ok "خطِ MODE در .env غیرفعال شد (نقش از آرگومان می‌آید)"
+fi
 chmod 600 "$APP_DIR/.env"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" "/home/$APP_USER" 2>/dev/null || true
 ok "دسترسی‌ها تنظیم شد"

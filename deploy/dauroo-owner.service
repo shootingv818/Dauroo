@@ -35,9 +35,12 @@ User=dauroo
 Group=dauroo
 WorkingDirectory=/opt/dauroo
 EnvironmentFile=/opt/dauroo/.env
-# نقشِ این پروسه؛ روی مقدارِ MODE در .env می‌چربد.
-Environment=MODE=owner
-ExecStart=/opt/dauroo/venv/bin/python main.py
+# نقش به‌صورت **آرگومان** داده می‌شود، نه با Environment=MODE.
+# چرا: مقادیرِ EnvironmentFile بر Environment= می‌چربند، پس `MODE=owner` داخلِ
+# .env باعث شد سرویسِ مشتری هم ربات مالک را اجرا کند — و آن‌وقت دو پروسه یک
+# فایلِ سشن را باز کردند و به «database is locked» و حلقه‌ی ری‌استارت رسیدند.
+# آرگومان را هیچ فایل محیطی نمی‌تواند بازنویسی کند.
+ExecStart=/opt/dauroo/venv/bin/python main.py owner
 
 # اگر کرش کرد یا relay قطع شد و ربات بیرون آمد، همیشه دوباره بالا بیا.
 Restart=always
