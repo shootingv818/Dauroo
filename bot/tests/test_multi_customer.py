@@ -650,6 +650,55 @@ def test_owner_never_blocked() -> None:
     ratelimit.unblock(other)
 
 
+def test_eitaa_creds_extraction() -> None:
+    """استخراجِ api_id/api_hash ایتا و کشفِ خودکارش توسط login_flow.
+
+    از یک شکستِ واقعی سرِ لاگین:
+        missing api_id/api_hash (set EITAA_API_ID/EITAA_API_HASH or run a capture)
+    سه منبعِ `login_flow.resolve_api_creds` خالی بودند و منبعِ داخلِ صفحه هم در
+    بیلدِ فشرده‌ی امروزِ ایتا `null` می‌دهد.
+    """
+    section("استخراجِ api_id/api_hash ایتا")
+    from eitaa import creds
+
+    # هر دو ترتیبِ ساختار باید شناسایی شود (همان دو رجکسِ پروژه‌ی مرجع).
+    js_a = 'var App={id:2496,hash:"8da85b0d5bfe62527e5b244c209159c3"};'
+    js_b = 'x={hash:"8da85b0d5bfe62527e5b244c209159c3",id:2496};'
+    check("ساختار id-then-hash شناسایی می‌شود",
+          creds.extract_from_text(js_a) == [(2496, "8da85b0d5bfe62527e5b244c209159c3")],
+          str(creds.extract_from_text(js_a)))
+    check("ساختار hash-then-id شناسایی می‌شود",
+          creds.extract_from_text(js_b) == [(2496, "8da85b0d5bfe62527e5b244c209159c3")],
+          str(creds.extract_from_text(js_b)))
+    # نباید هر عددی را api_id بگیرد.
+    check("متنِ بی‌ربط کاندیدا نمی‌سازد",
+          creds.extract_from_text("var a={id:5,hash:'short'};") == [])
+    check("هشِ کوتاه رد می‌شود",
+          creds.extract_from_text('{id:2496,hash:"abc"}') == [])
+
+    # نوشتن، و اینکه login_flow خودش پیدایش کند — چون همان glob است که
+    # resolve_api_creds استفاده می‌کند، این تست پیوندِ دو طرف را می‌بندد.
+    p = creds.write_params(2496, "8da85b0d5bfe62527e5b244c209159c3")
+    check("params.json نوشته شد", Path(p).is_file())
+    import glob as _glob
+    hits = _glob.glob(str(Path(config.ARTIFACTS_DIR) / "**" / "params.json"),
+                      recursive=True)
+    check("login_flow با glob خودش پیدایش می‌کند", bool(hits), str(hits))
+
+    from eitaa.login_flow import resolve_api_creds
+    aid, ah = resolve_api_creds()
+    check("resolve_api_creds مقدار را برمی‌گرداند",
+          aid == 2496 and ah == "8da85b0d5bfe62527e5b244c209159c3", f"{aid} {ah}")
+
+    # env باید بر فایل بچربد (تا بشود دستی override کرد).
+    os.environ["EITAA_API_ID"] = "999111"
+    os.environ["EITAA_API_HASH"] = "b" * 32
+    aid2, ah2 = resolve_api_creds()
+    check("متغیرِ محیطی بر فایل می‌چربد", aid2 == 999111, str(aid2))
+    os.environ.pop("EITAA_API_ID", None)
+    os.environ.pop("EITAA_API_HASH", None)
+
+
 def test_bots_import() -> None:
     section("هر دو ربات import می‌شوند و پنل رندر می‌شود")
     import customer_bot
@@ -699,6 +748,7 @@ def main_() -> int:
     test_maintenance()
     test_persian_text_folding()
     test_owner_never_blocked()
+    test_eitaa_creds_extraction()
     test_bots_import()
 
     print("\n" + "=" * 52)
