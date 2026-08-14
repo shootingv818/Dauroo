@@ -69,6 +69,26 @@ async def gate(event, *, action: str = "", counted: bool = True) -> bool:
     if not uid:
         return False
 
+    # ۰) مالک هرگز مسدود یا ریت‌لیمیت نمی‌شود.
+    #
+    # چرا این استثنا لازم است: مالک ربات مشتری را **تست می‌کند** و طبیعتاً تند
+    # دکمه می‌زند. بدونِ این استثنا از سقفِ ۲۰ اکشن در ۶۰ ثانیه می‌گذرد،
+    # مسدودی **دائمی** می‌خورد، و از آن لحظه هر اکشن در ربات مشتری **بی‌صدا**
+    # رد می‌شود (مسیرِ زیر پیامی نمی‌دهد، چون یک اسپمر نباید هزینه‌ای بسازد).
+    # نتیجه‌اش «دکمه را می‌زنم و هیچ اتفاقی نمی‌افتد» بود، بدونِ هیچ سرنخی.
+    # مالک تهدیدِ اسپم نیست و ابزارِ رفعِ مسدودی هم دستِ خودش است، پس این چک
+    # برایش فقط یک تله است.
+    if config.OWNER_ID and uid == int(config.OWNER_ID):
+        try:
+            user = await event.get_sender()
+            db.ensure_customer(uid, (getattr(user, "first_name", "") or ""),
+                               (getattr(user, "username", "") or ""))
+            if action:
+                db.log_event(uid, "action", label=action, counted=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gate owner] {exc}", flush=True)
+        return True
+
     # ۱) مسدود: از کش حافظه، قبل از هر کوئری یا await. صفر هزینه.
     if ratelimit.is_blocked(uid):
         ratelimit.note_blocked_attempt(uid)

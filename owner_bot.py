@@ -1176,13 +1176,29 @@ async def on_message(event):
 
     if step == "reset3":
         state.pop(oid, None)
-        if txt.strip() != "ریست":
-            await event.respond("تأیید نشد. چیزی پاک نشد.",
-                                buttons=[[Button.inline("🔙 ریست", b"reset")]])
+        # `cards.matches` مقایسه را یک‌شکل می‌کند: کیبورد ممکن است «ی» عربی
+        # بفرستد و مقایسه‌ی رشته‌ای خام شکست بخورد (روی سرور همین شد و تأیید
+        # قبول نمی‌شد). «reset» لاتین را هم می‌پذیریم.
+        if not cards.matches(txt, "ریست", "reset"):
+            await event.respond(logbus.card("تأیید نشد", [
+                "• چیزی پاک نشد.",
+                f"• چیزی که فرستادی: {cards.sanitize(txt, 40)}",
+                "• برای تأیید باید دقیقاً بنویسی: ریست",
+            ]), buttons=[[Button.inline("🔙 ریست", b"reset")]])
             return
         running = db.running_jobs()
         if running:
-            await event.respond(f"{len(running)} جاب در حال اجراست. اول متوقفشان کن.")
+            # کدام جاب‌ها؟ عددِ خالی کاری از پیش نمی‌برد — اگر جابی از یک کرشِ
+            # قبلی گیر کرده باشد، باید بتوانی ببینی و تصمیم بگیری.
+            rows = [f"• {len(running)} جاب در حال اجراست:"]
+            for j in running[:8]:
+                rows.append(f"•   {j.get('kind')} · مشتری {j.get('customer_id')} "
+                            f"· {gate._age_words(j.get('started_at'))}")
+            rows.append("")
+            rows.append("• اول متوقفشان کن، یا اگر از ری‌استارتِ قبلی گیر کرده‌اند")
+            rows.append("  ربات را ری‌استارت کن (خودش آن‌ها را می‌بندد).")
+            await event.respond(logbus.card("⛔ ریست انجام نشد", rows),
+                                buttons=[[Button.inline("🔙 ریست", b"reset")]])
             return
         n = 0
         try:

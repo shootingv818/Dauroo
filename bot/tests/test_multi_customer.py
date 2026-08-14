@@ -566,6 +566,90 @@ def test_report_routing() -> None:
     logbus.bind(None)
 
 
+def test_persian_text_folding() -> None:
+    """مقایسه‌ی متنِ کاربر نباید به شکلِ حروف حساس باشد.
+
+    از یک شکستِ واقعی: مالک «ریست» را می‌نوشت و تأیید قبول نمی‌شد، چون کیبورد
+    «ی» عربی (U+064A) می‌فرستد و رشته‌ی داخلِ کد «ی» فارسی (U+06CC) است.
+    """
+    section("یک‌شکل‌سازیِ متنِ فارسی برای مقایسه")
+    fa = "ریست"          # ی فارسی
+    ar = "ريست"          # ی عربی
+    check("دو شکلِ «ریست» واقعاً نابرابرند (پس باگ واقعی بود)", fa != ar)
+    check("بعد از fold برابر می‌شوند", cards.fold(fa) == cards.fold(ar))
+    check("matches شکلِ عربی را می‌پذیرد", cards.matches(ar, "ریست"))
+    check("matches شکلِ فارسی را می‌پذیرد", cards.matches(fa, "ریست"))
+    check("matches با ZWNJ هم کار می‌کند", cards.matches("ری\u200cست", "ریست"))
+    check("matches با فاصله‌ی اضافه کار می‌کند", cards.matches("  ریست  ", "ریست"))
+    check("matches گزینه‌ی لاتین را هم می‌پذیرد",
+          cards.matches("reset", "ریست", "reset"))
+    check("matches حساس به بزرگی/کوچکی نیست",
+          cards.matches("RESET", "ریست", "reset"))
+    # نباید هر چیزی را قبول کند، وگرنه تأیید بی‌معنی می‌شود.
+    check("متنِ نامربوط رد می‌شود", not cards.matches("بله", "ریست", "reset"))
+    check("متنِ خالی رد می‌شود", not cards.matches("", "ریست"))
+    check("«ریست» غلط رد می‌شود", not cards.matches("ریسك", "ریست"))
+    # ارقام هم یک‌شکل شوند (برای ورودی‌های عددی).
+    check("ارقامِ فارسی به لاتین تبدیل می‌شوند", cards.fold("۱۲۳") == "123")
+    check("ارقامِ عربی به لاتین تبدیل می‌شوند", cards.fold("٤٥٦") == "456")
+
+
+def test_owner_never_blocked() -> None:
+    """مالک نباید بتواند خودش را در ربات مشتری قفل کند.
+
+    از یک شکستِ واقعی: مالک ربات مشتری را تست می‌کرد، از سقفِ ۲۰ اکشن گذشت،
+    مسدودیِ **دائمی** خورد، و از آن لحظه هر دکمه **بی‌صدا** بی‌اثر شد — بدونِ
+    هیچ پیامی، چون مسیرِ مسدود عمداً هزینه‌ای نمی‌سازد.
+    """
+    section("مالک هرگز مسدود/ریت‌لیمیت نمی‌شود")
+    import asyncio
+
+    owner = int(config.OWNER_ID)
+    db.ensure_customer(owner, "مالک", "owner")
+
+    class _Ev:
+        def __init__(self, uid):
+            self.sender_id = uid
+            self.data = None
+            self.replies = []
+
+        async def get_sender(self):
+            return types.SimpleNamespace(first_name="مالک", username="owner")
+
+        async def respond(self, text, buttons=None):
+            self.replies.append(text)
+
+    # مالک را عمداً مسدود کن — همان وضعیتی که روی سرور پیش آمد.
+    ratelimit.block(owner, "تست")
+    check("مالک در دیتابیس مسدود ثبت شد", db.is_blocked(owner) is True)
+
+    ev = _Ev(owner)
+    allowed = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        gate.gate(ev, action="حذف اکانت"))
+    check("با اینکه مسدود است، دروازه به مالک اجازه می‌دهد", allowed is True)
+
+    # و اکشن‌های زیاد هم نباید مسدودش کند.
+    ratelimit.unblock(owner)
+    for _ in range(config.RATE_LIMIT_MAX * 3):
+        db.log_event(owner, "action", label="تست", counted=True)
+    ev2 = _Ev(owner)
+    allowed2 = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        gate.gate(ev2, action="ارسال"))
+    check("اکشنِ زیاد هم مالک را مسدود نمی‌کند", allowed2 is True)
+    check("مالک بعد از اکشنِ زیاد هم مسدود نشده",
+          ratelimit.is_blocked(owner) is False)
+
+    # ولی یک مشتریِ معمولی همچنان مسدود می‌شود — استثنا نباید سراسری باشد.
+    other = 987654
+    db.ensure_customer(other, "معمولی", "normal")
+    ratelimit.block(other, "تست")
+    ev3 = _Ev(other)
+    allowed3 = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        gate.gate(ev3, action="حذف اکانت"))
+    check("مشتریِ مسدود همچنان رد می‌شود", allowed3 is False)
+    ratelimit.unblock(other)
+
+
 def test_bots_import() -> None:
     section("هر دو ربات import می‌شوند و پنل رندر می‌شود")
     import customer_bot
@@ -613,6 +697,8 @@ def main_() -> int:
     test_jobs_and_events()
     test_outbox()
     test_maintenance()
+    test_persian_text_folding()
+    test_owner_never_blocked()
     test_bots_import()
 
     print("\n" + "=" * 52)
